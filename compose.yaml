@@ -1,0 +1,43 @@
+name: books-and-audio
+x-service: &service
+  build: .
+  image: books-and-audio:0.1.0-beta.1
+  user: "${APP_UID:-1000}:${APP_GID:-1000}"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp:mode=1777]
+services:
+  init:
+    <<: *service
+    profiles: [setup]
+    network_mode: none
+    command: [python, bootstrap.py, /runtime]
+    volumes:
+      - ${DATA_DIR:-./runtime}:/runtime
+  web:
+    <<: *service
+    restart: unless-stopped
+    environment:
+      ADMIN_ALLOWED_HOSTS: "${ADMIN_ALLOWED_HOSTS:-localhost,127.0.0.1}"
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8790}:8790"
+    volumes:
+      - ${DATA_DIR:-./runtime}/config/secret.key:/config/secret.key:ro
+      - ${DATA_DIR:-./runtime}/web:/admin-state
+      - ${DATA_DIR:-./runtime}/state/control:/admin-state/control
+    healthcheck:
+      test: [CMD, python, admin_web.py, --health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  worker:
+    <<: *service
+    restart: unless-stopped
+    environment:
+      BOOK_PROGRESS_ADMIN_CONTROL: "1"
+    command: [python, sync.py, --loop, --apply]
+    volumes:
+      - ${DATA_DIR:-./runtime}/config:/config:ro
+      - ${DATA_DIR:-./runtime}/state:/state

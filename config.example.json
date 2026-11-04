@@ -1,0 +1,24 @@
+{
+  "abs_url": "http://audiobookshelf:80",
+  "abs_version": "REPLACE_WITH_SERVER_VERSION",
+  "bo_url": "http://bookorbit:3000",
+  "mapping_provider": "bookorbit",
+  "interval_seconds": 60,
+  "mappings": [],
+  "auto_discovery": {
+    "enabled": true,
+    "abs_library_id": "REPLACE_WITH_AUDIOBOOK_LIBRARY_ID",
+    "bo_library_ids": [1]
+  },
+  "deployment": {
+    "audiobookshelf": {
+      "image": "REPLACE_WITH_LOCAL_IMAGE_ID",
+      "media_source": "/srv/example-media/audiobooks"
+    },
+    "bookorbit": {
+      "image": "REPLACE_WITH_LOCAL_IMAGE_ID",
+      "version": "REPLACE_WITH_APP_VERSION",
+      "media_source": "/srv/example-media/audiobooks"
+    }
+  }
+}

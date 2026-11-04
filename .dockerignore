@@ -1,0 +1,8 @@
+**
+!*.py
+!requirements.txt
+!admin_static/
+!admin_static/index.html
+!admin_static/app.js
+!admin_static/style.css
+test_*.py

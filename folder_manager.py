@@ -1,0 +1,447 @@
+"""Media folder aliases, managed by the sole control worker.
+
+This module never changes media or Docker mounts. The deployment supplies the
+worker/server mount allowlist; browser input can only select an existing folder
+inside it. An active alias change also needs a coordinator compatibility proof.
+"""
+from __future__ import annotations
+
+import contextlib
+import copy
+import fcntl
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import uuid
+
+
+class FolderManagerError(ValueError):
+    """Stable, public error code (no callback or filesystem exception text)."""
+
+
+KINDS = {'audiobooks': 'Hörbücher', 'ebooks': 'E-Books', 'podcasts': 'Podcasts'}
+ENDPOINTS = {'server': 'Server', 'worker': 'Sync-Dienst', 'abs': 'Audiobookshelf',
+             'bo': 'BookOrbit', 'jf': 'Jellyfin', 'bb': 'BookBridge'}
+ID = re.compile(r'[a-z][a-z0-9-]{0,79}\Z')
+LIMIT = 1024 * 1024
+
+
+def fail(code):
+    raise FolderManagerError(code)
+
+
+def clean_path(value):
+    if (not isinstance(value, str) or not value or len(value) > 4096 or '\\' in value
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        fail('invalid_folder_path')
+    path = PurePosixPath(value)
+    if (not path.is_absolute() or str(path) != value or '..' in path.parts
+            or value == '/' or value.startswith('//')):
+        fail('invalid_folder_path')
+    return path
+
+
+def _under(path, root):
+    try:
+        return clean_path(path).relative_to(clean_path(root))
+    except ValueError:
+        return None
+
+
+def _name(value):
+    if not isinstance(value, str) or not 1 <= len(value) <= 120 or not value.strip() or any(ord(c) < 32 for c in value):
+        fail('invalid_folder_name')
+    return value
+
+
+def _paths(value):
+    if not isinstance(value, dict) or set(value) - set(ENDPOINTS) or not value.get('worker'):
+        fail('invalid_folder_paths')
+    return {k: str(clean_path(v)) for k, v in value.items() if v is not None and v != ''}
+
+
+def active_folders(folders_or_config):
+    """Accept effective config or rows; configuration without aliases is legacy."""
+    rows = (folders_or_config.get('folder_mappings', [])
+            if isinstance(folders_or_config, dict) else folders_or_config)
+    if not isinstance(rows, list):
+        fail('invalid_folder_configuration')
+    return [row for row in rows if row.get('active', True)]
+
+
+def translate(path, source, target, kind, folders_or_config):
+    """Translate an exact rooted path, refusing absent or ambiguous aliases.
+
+    Source and target are endpoint IDs from ENDPOINTS. A root itself is allowed;
+    media callers separately require a file below it. No filesystem is accessed.
+    """
+    clean_path(path)
+    if source not in ENDPOINTS or target not in ENDPOINTS or kind not in KINDS:
+        fail('invalid_folder_endpoint')
+    found = []
+    for row in active_folders(folders_or_config):
+        if row.get('kind') != kind:
+            continue
+        paths = _paths(row.get('paths'))
+        if source not in paths or target not in paths:
+            continue
+        rel = _under(path, paths[source])
+        if rel is not None:
+            found.append(str(clean_path(paths[target]) / rel))
+    if len(found) != 1:
+        fail('ambiguous_folder_mapping' if found else 'folder_mapping_missing')
+    return found[0]
+
+
+
+def validate_service_paths(row, deployment_mounts):
+    """Prove app aliases share the worker's host directory using trusted mounts.
+
+    deployment_mounts is a complete host-produced list of {endpoint, container,
+    server}, never GUI input. Nested mounts inside a selected root are refused:
+    such a root would not describe one shared directory for future additions.
+    """
+    paths = _paths(row['paths'])
+    if not paths.get('server') or not isinstance(deployment_mounts, list):
+        fail('folder_service_mounts_unverified')
+    for endpoint, selected in paths.items():
+        if endpoint == 'server':
+            continue
+        candidates = []
+        for mount in deployment_mounts:
+            if not isinstance(mount, dict) or set(mount) != {'endpoint', 'container', 'server'}:
+                fail('invalid_folder_service_mounts')
+            if mount['endpoint'] not in ENDPOINTS or mount['endpoint'] == 'server':
+                fail('invalid_folder_service_mounts')
+            container, server = clean_path(mount['container']), clean_path(mount['server'])
+            if mount['endpoint'] != endpoint:
+                continue
+            relative = _under(selected, str(container))
+            if relative is not None:
+                candidates.append((container, server / relative))
+            if _under(str(container), selected) is not None and str(container) != selected:
+                fail('folder_nested_service_mount')
+        if not candidates:
+            fail('folder_service_mounts_unverified')
+        deepest = max(len(container.parts) for container, _ in candidates)
+        resolved = [server for container, server in candidates if len(container.parts) == deepest]
+        if len(resolved) != 1 or str(resolved[0]) != paths['server']:
+            fail('folder_service_mount_mismatch')
+    return True
+
+
+def default_rows(config):
+    if config.get('folder_mappings') is not None:
+        return copy.deepcopy(config['folder_mappings'])
+    ebook = config.get('jellyfin', {}).get('auto_ebooks') or {}
+    rows = [dict(id='audiobooks-default', kind='audiobooks', name='Hörbücher', active=True,
+                 paths=dict(worker='/audiobooks', abs='/audiobooks', bo='/audiobooks',
+                            jf='/data/audiobooks', bb='/audiobooks')),
+            dict(id='ebooks-default', kind='ebooks', name='E-Books', active=True,
+                 paths=dict(worker=ebook.get('local_root', '/ebooks'),
+                            bo=ebook.get('bo_root', '/books'),
+                            jf=ebook.get('jf_root', '/data/ebooks'), bb='/books'))]
+    podcasts = config.get('podcasts')
+    if isinstance(podcasts, dict) and all(podcasts.get(k) for k in ('worker_root', 'abs_root', 'jellyfin_root')):
+        rows.append(dict(id='podcasts-default', kind='podcasts', name='Podcasts', active=True,
+                         paths=dict(worker=podcasts['worker_root'], abs=podcasts['abs_root'], jf=podcasts['jellyfin_root'])))
+    return rows
+
+
+class FolderManager:
+    """Persist aliases; activate only within trusted mounts and with review.
+
+    access_roots is deployment-owned [{worker: '/ebooks', server: '/mnt/...'}].
+    Server may be omitted when unavailable. Never derive it from browser values.
+    mount_checker is only a test seam; production uses os.path.ismount.
+    compatibility_callback(old_config, new_config) must return exactly True.
+    It should check copied coordinator state + application paths without writing
+    progress. Root aliases alone cannot prove that apps see the same files.
+    """
+    def __init__(self, root, base_config, access_roots=None, mount_checker=None):
+        self.root = Path(root) / 'control'
+        self.path = self.root / 'folders.json'
+        self.base_config = copy.deepcopy(base_config)
+        self.mount_checker = mount_checker or os.path.ismount
+        roots = access_roots if access_roots is not None else base_config.get('folder_access_roots')
+        if roots is None:
+            roots = [dict(worker=p) for p in ('/audiobooks', '/ebooks', '/podcasts') if self.mount_checker(p)]
+        if not isinstance(roots, list) or len(roots) > 100:
+            fail('invalid_folder_access_roots')
+        self.access_roots = []
+        for row in roots:
+            if not isinstance(row, dict) or set(row) - {'worker', 'server'} or not row.get('worker'):
+                fail('invalid_folder_access_roots')
+            clean = {k: str(clean_path(v)) for k, v in row.items() if v is not None}
+            # Broad mounts would turn an alias form into arbitrary file access.
+            if clean['worker'] in {'/app', '/app-sync', '/config', '/state', '/admin-state', '/etc', '/proc', '/sys', '/dev', '/run', '/tmp', '/var', '/opt', '/mnt', '/media'}:
+                fail('unsafe_folder_access_root')
+            if any(_under(clean['worker'], x['worker']) is not None or _under(x['worker'], clean['worker']) is not None for x in self.access_roots):
+                fail('overlapping_folder_access_roots')
+            self.access_roots.append(clean)
+        initial = dict(schema=1, revision=0, rows=default_rows(base_config))
+        for row in initial['rows']:
+            row.setdefault('name', KINDS.get(row.get('kind'), 'Ordner'))
+            row.setdefault('active', True)
+            row['paths'] = self._with_server(row['paths'])
+        self._validate_state(initial)
+        self.initial = initial
+
+    def _with_server(self, paths):
+        result = _paths(paths)
+        matches = [(root, _under(result['worker'], root['worker'])) for root in self.access_roots]
+        matches = [(root, rel) for root, rel in matches if rel is not None]
+        if len(matches) == 1 and matches[0][0].get('server'):
+            root, rel = matches[0]
+            server = str(clean_path(root['server']) / rel)
+            if result.get('server') not in (None, server):
+                fail('server_folder_mismatch')
+            result['server'] = server
+        elif result.get('server'):
+            fail('server_folder_unverified')
+        return result
+
+    def _validate_state(self, state):
+        if (not isinstance(state, dict) or set(state) != {'schema', 'revision', 'rows'}
+                or state['schema'] != 1 or type(state['revision']) is not int or state['revision'] < 0
+                or not isinstance(state['rows'], list) or len(state['rows']) > 100):
+            fail('invalid_folder_store')
+        ids, active = set(), set()
+        for row in state['rows']:
+            if (not isinstance(row, dict) or set(row) != {'id', 'kind', 'name', 'active', 'paths'}
+                    or not isinstance(row['id'], str) or not ID.fullmatch(row['id']) or row['id'] in ids
+                    or row['kind'] not in KINDS or type(row['active']) is not bool):
+                fail('invalid_folder_store')
+            ids.add(row['id']); _name(row['name']); _paths(row['paths'])
+            if row['active']:
+                if row['kind'] in active:
+                    fail('duplicate_active_folder')
+                active.add(row['kind'])
+
+    def _directory(self, create=False):
+        if create:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = self.root.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022 or info.st_uid != os.geteuid():
+            fail('unsafe_folder_directory')
+
+    @contextlib.contextmanager
+    def _locked(self):
+        self._directory(True)
+        fd = os.open(self.root / '.folders.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.geteuid():
+                fail('unsafe_folder_lock')
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def _read(self):
+        if not self.path.exists() and not self.path.is_symlink():
+            if (self.root / '.folders.seeded').exists():
+                fail('folder_store_unavailable')
+            return copy.deepcopy(self.initial), None
+        try:
+            self._directory()
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, 'rb') as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.geteuid() or not 0 < info.st_size <= LIMIT:
+                    fail('unsafe_folder_store')
+                raw = handle.read(LIMIT + 1)
+            state = json.loads(raw)
+            self._validate_state(state)
+            return state, raw
+        except Exception:
+            raise FolderManagerError('folder_store_unavailable') from None
+
+    def _write(self, state, previous=None):
+        raw = json.dumps(state, ensure_ascii=False, sort_keys=True, allow_nan=False).encode()
+        if len(raw) > LIMIT:
+            fail('folder_store_limit')
+        if previous is not None:
+            backup = self.root / ('folders.rev-%020d.json' % (state['revision'] - 1))
+            try:
+                fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            except FileExistsError:
+                if backup.is_symlink() or backup.read_bytes() != previous:
+                    fail('folder_backup_conflict')
+            else:
+                with os.fdopen(fd, 'wb') as handle:
+                    handle.write(previous); handle.flush(); os.fsync(handle.fileno())
+        temporary = self.root / ('.folders-' + uuid.uuid4().hex)
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write(raw); handle.flush(); os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+            directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try: os.fsync(directory)
+            finally: os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def seed(self):
+        with self._locked():
+            state, raw = self._read()
+            if raw is None:
+                self._write(state)
+            fd = os.open(self.root / '.folders.seeded', os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.geteuid():
+                    fail('unsafe_folder_store')
+                os.fsync(fd)
+            finally: os.close(fd)
+            directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try: os.fsync(directory)
+            finally: os.close(directory)
+        return self.public()
+
+    def check(self, row):
+        paths = self._with_server(row['paths'])
+        matches = [root for root in self.access_roots if _under(paths['worker'], root['worker']) is not None]
+        if len(matches) != 1:
+            fail('folder_not_in_allowed_mount')
+        root = matches[0]
+        if self.mount_checker(root['worker']) is not True:
+            fail('folder_mount_unavailable')
+        try:
+            directory = Path(paths['worker'])
+            # Resolve all ancestors to reject symlink redirects, including the mount.
+            if directory.resolve(strict=True) != directory or not directory.is_dir():
+                fail('folder_symlink_or_not_directory')
+            for ancestor in (directory, *directory.parents):
+                if ancestor.is_symlink():
+                    fail('folder_symlink_or_not_directory')
+            fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                for component in directory.parts[1:]:
+                    child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    os.close(fd); fd = child
+                if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                    fail('folder_symlink_or_not_directory')
+            finally: os.close(fd)
+        except FolderManagerError:
+            raise
+        except OSError:
+            raise FolderManagerError('folder_unavailable') from None
+        return dict(ok=True, code='folder_checked', paths=paths, media_changed=False)
+
+    def public(self):
+        state, _ = self._read()
+        rows = []
+        for row in state['rows']:
+            result = copy.deepcopy(row)
+            try:
+                check = self.check(row)
+                result['check'] = dict(ok=True, code=check['code'])
+            except FolderManagerError as exc:
+                result['check'] = dict(ok=False, code=str(exc))
+            rows.append(result)
+        return dict(revision=state['revision'], rows=rows, kinds=copy.deepcopy(KINDS),
+                    endpoints=copy.deepcopy(ENDPOINTS), access_roots=copy.deepcopy(self.access_roots))
+
+    def _effective(self, state, config):
+        result = copy.deepcopy(config)
+        rows = [copy.deepcopy(row) for row in state['rows'] if row['active']]
+        result['folder_mappings'] = rows
+        ebook = next((row for row in rows if row['kind'] == 'ebooks'), None)
+        spec = result.get('jellyfin', {}).get('auto_ebooks')
+        if isinstance(spec, dict):
+            if ebook and all(k in ebook['paths'] for k in ('worker', 'bo', 'jf')):
+                spec.update(local_root=ebook['paths']['worker'], bo_root=ebook['paths']['bo'], jf_root=ebook['paths']['jf'])
+            else:
+                spec['enabled'] = False
+        podcast = next((row for row in rows if row['kind'] == 'podcasts'), None)
+        if podcast or result.get('podcasts') is not None:
+            settings = result.setdefault('podcasts', {})
+            settings.pop('folder_error', None)
+            for key in ('worker_root', 'abs_root', 'jellyfin_root'): settings.pop(key, None)
+            if podcast and all(podcast['paths'].get(k) for k in ('worker', 'abs', 'jf')):
+                settings.update(worker_root=podcast['paths']['worker'], abs_root=podcast['paths']['abs'],
+                                jellyfin_root=podcast['paths']['jf'])
+            elif settings.get('enabled'):
+                settings['folder_error'] = 'podcast_folder_missing'
+        return result
+
+    def effective(self, config=None):
+        state, _ = self._read()
+        podcast_error = None
+        for row in state['rows']:
+            if row['active']:
+                if row['kind'] == 'podcasts':
+                    try: self.check(row)
+                    except FolderManagerError as exc: podcast_error = str(exc)
+                else:
+                    self.check(row)
+        result = self._effective(state, self.base_config if config is None else config)
+        if podcast_error:
+            spec = result.setdefault('podcasts', {})
+            spec['folder_error'] = podcast_error
+            for key in ('worker_root', 'abs_root', 'jellyfin_root'): spec.pop(key, None)
+        return result
+
+    def mutate(self, action, payload, compatibility_callback=None):
+        revision = None
+        try:
+            with self._locked():
+                old, raw = self._read(); revision = old['revision']
+                if raw is None:
+                    fail('folders_not_initialized')
+                if not isinstance(payload, dict) or type(payload.get('expected_revision')) is not int or payload['expected_revision'] != revision:
+                    fail('stale_folder_revision')
+                if action not in {'create', 'update', 'test', 'activate', 'deactivate', 'delete'}:
+                    fail('invalid_folder_action')
+                allowed = {'expected_revision', 'kind', 'name', 'paths'} if action == 'create' else {'expected_revision', 'id'}
+                if action == 'update': allowed |= {'name', 'paths'}
+                if set(payload) - allowed: fail('invalid_folder_field')
+                state = copy.deepcopy(old)
+                if action == 'create':
+                    kind = payload.get('kind')
+                    if kind not in KINDS or len(state['rows']) >= 100: fail('invalid_folder_kind')
+                    row = dict(id=kind + '-' + uuid.uuid4().hex, kind=kind, name=_name(payload.get('name')),
+                               paths=self._with_server(payload.get('paths')), active=False)
+                    state['rows'].append(row)
+                else:
+                    row = next((r for r in state['rows'] if r['id'] == payload.get('id')), None)
+                    if row is None: fail('folder_not_found')
+                if action == 'update':
+                    if 'name' in payload: row['name'] = _name(payload['name'])
+                    if 'paths' in payload:
+                        if not isinstance(payload['paths'], dict): fail('invalid_folder_paths')
+                        changed = dict(row['paths']); changed.pop('server', None)
+                        changed.update(payload['paths']); row['paths'] = self._with_server(changed)
+                if action in {'test', 'activate'} or action == 'update' and row['active']:
+                    proof = self.check(row)
+                    if action == 'test':
+                        return dict(ok=True, code='folder_checked', revision=revision, folder_id=row['id'], check=proof)
+                    if action == 'activate':
+                        for candidate in state['rows']:
+                            if candidate['kind'] == row['kind']: candidate['active'] = candidate['id'] == row['id']
+                    try:
+                        compatible = callable(compatibility_callback) and compatibility_callback(
+                            self._effective(old, self.base_config), self._effective(state, self.base_config)) is True
+                    except Exception: compatible = False
+                    if not compatible: fail('incompatible_folder_mapping')
+                elif action in {'deactivate', 'delete'}:
+                    if action == 'delete': state['rows'].remove(row)
+                    else: row['active'] = False
+                    if row['active'] or action == 'deactivate':
+                        try:
+                            compatible = callable(compatibility_callback) and compatibility_callback(
+                                self._effective(old, self.base_config), self._effective(state, self.base_config)) is True
+                        except Exception: compatible = False
+                        if not compatible: fail('incompatible_folder_mapping')
+                self._validate_state(state)
+                state['revision'] += 1
+                self._write(state, raw)
+                return dict(ok=True, code='folder_saved', revision=state['revision'], folder_id=row['id'])
+        except FolderManagerError as exc:
+            return dict(ok=False, code=str(exc), revision=revision)
+        except Exception:
+            return dict(ok=False, code='folder_change_failed', revision=revision)
