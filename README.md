@@ -1,6 +1,6 @@
 # Books & Audio
 
-**Öffentliche Beta · v0.1.0-beta.1**
+**Öffentliche Beta · v0.1.0-beta.2**
 
 Auf dem Handy ein Hörbuch unterbrechen und in einem anderen Player an derselben Stelle weiterhören: Books & Audio gleicht Hörpositionen, Lesefortschritt und den Gehört-Status von Podcastfolgen zwischen selbst gehosteten Mediendiensten ab.
 
@@ -11,6 +11,10 @@ Auf dem Handy ein Hörbuch unterbrechen und in einem anderen Player an derselben
 | Podcasts | Hörstand je Folge zwischen Audiobookshelf und Jellyfin; PinePods und GPodder können zusätzlich teilnehmen. Bei unterschiedlich langen Fassungen lassen sich „gehört“ und „ungehört“ getrennt von einer sekundengenauen Hörposition übernehmen. |
 
 Die deutsche Weboberfläche zeigt zuerst Titel mit Handlungsbedarf. Bücher, Hörbücher und Podcasts haben eigene Listen. Unter **Freigaben** siehst du die gemeldeten Stände, kannst Konflikte prüfen und einzelne Folgen als gehört markieren oder auf Anfang setzen. Du kannst den gesamten Abgleich pausieren und fortsetzen. Eine globale Freigabe hebt keine ungeklärte Zuordnung einzelner Titel auf.
+
+## Direkt mit Dockge installieren
+
+Füge die [fertige Compose-Datei](compose.dockge.yaml) in einen neuen Dockge-Stack ein, setze `BOOKS_AUDIO_HOST` auf den Namen oder die IP deines Servers und wähle **Deploy**. Dockge lädt das fertige Image `ghcr.io/christophzepp/books-and-audio:beta` für AMD64 oder ARM64. Spätere Versionen installierst du über **Update** im selben Stack. Die [Dockge-Anleitung](DOCKGE.md) erklärt Anmeldung, Datenspeicherung und Versionswahl.
 
 ## Mit Docker ausprobieren
 

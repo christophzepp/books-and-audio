@@ -1,0 +1,69 @@
+# In Dockge als compose.yaml einfügen. In der Stack-Umgebung BOOKS_AUDIO_HOST
+# auf die IP oder den Namen setzen, mit dem der Browser den Server erreicht.
+x-service: &service
+  image: ${BOOKS_AUDIO_IMAGE:-ghcr.io/christophzepp/books-and-audio:beta}
+  user: "1000:1000"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp:mode=1777]
+
+services:
+  init:
+    <<: *service
+    network_mode: none
+    restart: "no"
+    command: [python, dockge_init.py]
+    volumes:
+      - config:/installation
+      - web_key:/keys
+      - state:/state
+      - control:/state/control
+
+  web:
+    <<: *service
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      ADMIN_ALLOWED_HOSTS: "localhost,127.0.0.1,${BOOKS_AUDIO_HOST:-localhost}"
+      ADMIN_KEY_FILE: /keys/secret.key
+    ports:
+      - "${BOOKS_AUDIO_BIND:-0.0.0.0}:${BOOKS_AUDIO_PORT:-8790}:8790"
+    volumes:
+      - web_key:/keys:ro
+      - web:/admin-state
+      - control:/admin-state/control
+    healthcheck:
+      test: [CMD, python, admin_web.py, --health]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    <<: *service
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      BOOK_PROGRESS_ADMIN_CONTROL: "1"
+    command: [python, sync.py, --config, /installation/current/config.json, --credentials, /installation/current/credentials.enc, --key, /installation/current/secret.key, --apply, --loop]
+    volumes:
+      - config:/installation:ro
+      - state:/state
+      - control:/state/control
+    healthcheck:
+      test: [CMD, python, sync.py, --health]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  config:
+  web_key:
+  web:
+  state:
+  control:

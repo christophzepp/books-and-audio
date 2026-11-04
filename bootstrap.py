@@ -31,6 +31,16 @@ def initialize(root, cfg, creds):
             f.write(data)
     AdminStore(root / 'state', conf / 'secret.key').pause(True)
 
+def prompt_credentials(cfg):
+    fields = []
+    if cfg.get('abs_url'): fields += ['abs_token']
+    if cfg.get('bo_url'): fields += ['bo_username', 'bo_password']
+    if cfg.get('jellyfin', {}).get('enabled'): fields += ['jellyfin_token']
+    if cfg.get('bookbridge', {}).get('enabled'): fields += ['bookbridge_password']
+    if cfg.get('pinepods', {}).get('enabled'): fields += ['pinepods_password', 'pinepods_api_key']
+    if cfg.get('ntfy_url'): fields += ['ntfy_authorization']
+    return {field:getpass.getpass(field + ': ') for field in fields}
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
@@ -38,16 +48,7 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     cfg = json.loads(args.config.read_text()) if args.config else {'mappings': [], 'interval_seconds': 60}
-    creds = {}
-    if args.config:
-        fields = []
-        if cfg.get('abs_url'): fields += ['abs_token']
-        if cfg.get('bo_url'): fields += ['bo_username', 'bo_password']
-        if cfg.get('jellyfin', {}).get('enabled'): fields += ['jellyfin_token']
-        if cfg.get('bookbridge', {}).get('enabled'): fields += ['bookbridge_password']
-        if cfg.get('pinepods', {}).get('enabled'): fields += ['pinepods_password', 'pinepods_api_key']
-        if cfg.get('ntfy_url'): fields += ['ntfy_authorization']
-        creds = {field:getpass.getpass(field + ': ') for field in fields}
+    creds = prompt_credentials(cfg) if args.config else {}
     initialize(args.directory, cfg, creds)
     print("Initialisiert. Die Synchronisation ist pausiert.")
 
