@@ -351,8 +351,8 @@ class Administration:
                         other = self.bridge_type(path, previous, creds)
                         before_result = podcast_sync.preview(other)
                         from podcast_sync import pine_history_ids
-                        enrolled = pine_history_ids(candidate)
-                        if variant_activation_signature(before_result, enrolled) != variant_activation_signature(result, enrolled):
+                        known = pine_history_ids(candidate) | {r['id'] for r in before_result.get('blocked', []) if isinstance(r, dict) and isinstance(r.get('id'), str)}
+                        if variant_activation_signature(before_result, known) != variant_activation_signature(result, known):
                             raise ValueError('podcast_not_ready')
                         retained = len(result['blocked'])
                     finally: close_bridge(other)

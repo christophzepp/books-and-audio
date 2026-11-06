@@ -75,7 +75,7 @@ class PodcastAdminTests(Fixture):
         result=dict(ok=False,mode='dry-run',enabled=True,mapped=1,scope_fingerprint='a'*64,
                     episodes=[row],blocked=[dict(id='_podcast:a',reason=reason)])
         def preview(b):return copy.deepcopy(result)
-        module=SimpleNamespace(preview=preview,pine_history_ids=lambda b:{'_podcast:a'})
+        module=SimpleNamespace(preview=preview,pine_history_ids=lambda b:set())
         before=self.saved_state()
         with patch.dict('sys.modules',{'podcast_sync':module}):
             checked=self.podcast(False,primary_source='jf')
