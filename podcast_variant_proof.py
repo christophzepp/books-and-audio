@@ -180,9 +180,10 @@ class VariantProof:
 
     def _seed(self,mapping,source,clock):
         record=self.b.load('_pine_metadata:'+mapping['id'])
-        evidence=record.get('evidence')
+        evidence=record.get('candidate_evidence',record.get('evidence'))
+        evidence_sha=record.get('candidate_evidence_sha256',record.get('evidence_sha256'))
         if (record.get('schema')!=1 or record.get('stage')!='deferred' or record.get('source')!=source
-                or not isinstance(evidence,dict) or record.get('evidence_sha256')!=digest(evidence)
+                or not isinstance(evidence,dict) or evidence_sha!=digest(evidence)
                 or evidence_epoch(evidence) is None or evidence_epoch(evidence)>clock
                 or not validated_variant(evidence,mapping['enclosure_url'],mapping['duration'],evidence_epoch(evidence))):
             return None

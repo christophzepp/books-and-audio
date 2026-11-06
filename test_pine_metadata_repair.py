@@ -325,12 +325,12 @@ class RepairTests(unittest.TestCase):
         original = self.b.load(self.key)['full_proof']
         self.b.time += 60
         self.probe.side_effect = [{'known':False,'reason':'mpeg_audio_without_frame_count_tag'}]
-        self.assertEqual(self.run_repair()['reason'], 'metadata_full_probe_daily_limit')
+        self.assertEqual(self.run_repair()['reason'], 'metadata_full_probe_cooldown')
         saved = self.b.load(self.key)
         self.assertEqual(saved['full_proof'], original)
         self.assertEqual(saved['full_proof_at'], 1000)
         self.assertEqual(saved['last_full_probe_at'], 1000)
-        self.assertEqual(saved['next_probe_at'], 1000 + 86400)
+        self.assertEqual(saved['next_probe_at'], 1000 + 900)
         self.assertEqual(self.probe.call_args.kwargs['previous_evidence'], original)
         self.assertNotIn('full_probe', self.probe.call_args.kwargs)
         self.assertEqual(self.b.pinepods.posts, [600])

@@ -1,9 +1,9 @@
-## Stabilerer Podcast-Abgleich und originales Floppy
+## Automatische Wiederaufnahme beim Podcast-Abgleich
 
-- Optionaler privater Trackingdienst für PinePods → Floppy: dauerhafter Importstand, wiederholbare Antworten bei Abbruch und Erkennung bereits importierter Hörereignisse. Auch tägliche Vollanfragen des originalen Floppy-Importers starten damit nicht erneut bei der gesamten Historie.
-- Neue Hörereignisse zählen unabhängig vom Veröffentlichungsdatum der Folge. Nullpositionen und eigene Sync-Geräte erzeugen keine neuen Hörvorgänge. Bestätigte genaue Audio-URL-Aliasse sind pro Feed möglich.
-- Die Podcast-GUI trennt „Position + Status“, „Nur Status“ für verschiedene Fassungen, wartende Zuordnungen und Sperren. Vor dem Übernehmen von Einstellungen wird der betroffene Umfang geprüft und angezeigt.
-- Eine reine Änderung der Primärquelle kann unveränderte bestehende Identitätssperren erhalten. Sie gibt diese Folgen nicht frei; neue Sperren, andere Bibliotheken und offene Übertragungen werden weiterhin abgewiesen.
-- PinePods, Audiobookshelf und Floppy benötigen keine Codeänderungen. BookOrbit bleibt bis zur geprüften originalen Podcast-Schnittstelle vorbereitet.
+- Bereits bestätigte Feed-Wechsel gelten auch für neue Folgen mit exakt passender Audio-Adresse im selben persönlichen PinePods-Abonnement. Original-Apps und Abonnements werden nicht verändert.
+- Bestehende Hörereignisse unter früheren Adressen, unterschiedliche Ausgaben und doppelte Zuordnungen werden ausdrücklich berücksichtigt. Es gibt keine Zuordnung allein anhand des Titels.
+- Gültige Laufzeitmessungen gehen durch spätere Wiederholungsversuche oder Wartezeiten nicht mehr verloren. Statusübertragungen benötigen weiterhin einen frischen Nachweis.
+- Vollständige Audioprüfungen erhalten einen begrenzten Abstand von 15 Minuten statt einer pauschalen 24-Stunden-Sperre. Bereits gespeicherte Tagespausen werden automatisch korrigiert.
+- 15 neue Regressionstests prüfen Feed-Wechsel, fremde Konten, alte Hörereignisse, doppelte Zuordnungen und erhaltene Messnachweise.
 
-Docker: `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.4` oder `beta`, für Linux AMD64 und ARM64. Die normale Dockge-Compose-Datei bleibt kompatibel. Der optionale Trackingdienst hat eine eigene Compose-Vorlage und Anleitung in `TRACKING.md`; vorhandene Importstände werden ausdrücklich übernommen.
+Docker: `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.5` oder `beta`, für Linux AMD64 und ARM64. Bestehende Dockge-Stacks und gespeicherte Fortschritte bleiben kompatibel.

@@ -26,3 +26,9 @@ Ein altes Veröffentlichungsdatum ist kein Ausschluss: Ein heute erzeugtes Höre
 ## Prüfung vor einem größeren Rollout
 
 Mit einer Kopie der Datenbank prüfen: Abschluss, Wiederaufnahme, ausdrückliches Zurücksetzen, Konflikt mit der primären Quelle, unterschiedliche Audiofassungen, alte Audio-URLs, wiederholter Import, Dienstneustart und vorübergehender Ausfall. Metadatenkorrekturen müssen vorhandene Folgen- und Hörvorgangs-IDs, Hördaten und Bewertungen erhalten. Erst danach die produktive Verbindung umstellen. Private Feed-URLs und Zugangsdaten gehören nicht in GitHub oder Fehlerprotokolle.
+
+## Automatische Wiederaufnahme
+
+Ein bereits per Folgenkennung bestätigter Feed-Wechsel wird auch für neue Folgen desselben Audiobookshelf-Podcasts verwendet, wenn PinePods die genaue Audio-Adresse im bestätigten persönlichen Abonnement führt. Beide gleichzeitig vorhandenen Feed-Ausgaben bleiben getrennt. Hörereignisse unter der früheren Adresse, eine andere Zuordnung oder eine mehrdeutige persönliche Bibliothek erfordern weiterhin Prüfung. Die Quellkonfiguration und die Metadaten der Original-Apps werden dabei nicht geändert.
+
+Gültige Laufzeitmessungen bleiben bei späteren Netzfehlern oder verschobenen Prüfungen erhalten. Sie ersetzen keine frische Bestätigung vor einer Statusübertragung. Für vollständige Audioprüfungen gilt ein Abstand von 15 Minuten statt einer pauschalen Tagespause; je Zyklus bleiben Downloadanzahl, Größe und Laufzeit begrenzt. Frühere Tagespausen werden beim Update entsprechend verkürzt. Unterschiedliche bestätigte Fassungen verwenden weiterhin ausschließlich den Statusabgleich.

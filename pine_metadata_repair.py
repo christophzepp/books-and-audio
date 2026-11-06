@@ -20,6 +20,7 @@ import uuid
 
 
 NAMESPACE = '_pine_metadata:'
+FULL_PROBE_INTERVAL = 900
 
 
 def encoded(value):
@@ -130,9 +131,9 @@ class PineMetadataRepair:
                 {'mpeg_audio_without_frame_count_tag', 'id3_exceeds_prefix', 'no_valid_frame_count_header'}):
             remaining = self.probe_deadline - time.monotonic()
             if (type(last_full_probe_at) in (int, float) and math.isfinite(last_full_probe_at)
-                    and self.b.clock() - last_full_probe_at < 86400):
-                return {'known': False, 'reason': 'full_probe_daily_budget',
-                        'next_full_probe_at': last_full_probe_at + 86400}
+                    and self.b.clock() - last_full_probe_at < FULL_PROBE_INTERVAL):
+                return {'known': False, 'reason': 'full_probe_cooldown',
+                        'next_full_probe_at': last_full_probe_at + FULL_PROBE_INTERVAL}
             if not self.full_probe_used and remaining >= 1:
                 self.full_probe_used = True
                 self.current_full_probe_at = self.b.clock()
@@ -153,6 +154,14 @@ class PineMetadataRepair:
         if not isinstance(record, dict) or record.get('source') != source:
             return {}
         fields = {}
+        from pine_media_probe import valid_result
+        # Deferral is not evidence of a different file. Retain the last valid
+        # measurement separately from the latest failed/budgeted attempt.
+        for evidence in (record.get('candidate_evidence'), record.get('evidence'), record.get('full_proof')):
+            if (isinstance(evidence, dict) and evidence.get('known') is True
+                    and valid_result(evidence, source['mapping']['enclosure_url'])):
+                fields.update(candidate_evidence=copy.deepcopy(evidence), candidate_evidence_sha256=digest(evidence))
+                break
         full_at = record.get('last_full_probe_at')
         if type(full_at) in (int, float) and math.isfinite(full_at) and 0 <= full_at <= self.b.clock():
             fields['last_full_probe_at'] = full_at
@@ -161,7 +170,6 @@ class PineMetadataRepair:
                 and 0 <= self.b.clock() - proof_at <= 30 * 86400
                 and isinstance(proof, dict) and proof.get('known') is True
                 and proof.get('header', {}).get('source') == 'full_mp3_packets'):
-            from pine_media_probe import valid_result
             if valid_result(proof, source['mapping']['enclosure_url']):
                 fields.update(full_proof=copy.deepcopy(proof), full_proof_at=proof_at)
         return fields
@@ -242,6 +250,11 @@ class PineMetadataRepair:
         if evidence:
             record['evidence_sha256'] = digest(evidence)
             record['evidence'] = evidence
+            from pine_media_probe import valid_result
+            if evidence.get('known') is True and valid_result(evidence, source['mapping']['enclosure_url']):
+                record.update(candidate_evidence=copy.deepcopy(evidence), candidate_evidence_sha256=digest(evidence))
+                if evidence.get('header', {}).get('source') == 'full_mp3_packets':
+                    record.update(full_proof=copy.deepcopy(evidence), full_proof_at=self.current_full_probe_at or self.b.clock())
         self._persist(key, record, 'deferred', reason)
         return result('waiting', reason)
 
@@ -286,7 +299,16 @@ class PineMetadataRepair:
             source = self._source(mapping)
             if record.get('stage') == 'intent':
                 return self._recover(key, record, mapping, source)
-            if (record.get('source') == source and record.get('next_probe_at', 0) > self.b.clock()):
+            retry_at = record.get('next_probe_at', 0)
+            full_at = record.get('last_full_probe_at')
+            # Upgrade the old per-URL daily-budget deferral. A publisher can
+            # rotate its ad cut within a day; one attempt every 15 minutes is
+            # still bounded by the cycle's single full download and deadline.
+            if (type(full_at) in (int, float) and math.isfinite(full_at)
+                    and type(retry_at) in (int, float) and math.isfinite(retry_at)
+                    and abs(retry_at - full_at - 86400) < .01):
+                retry_at = min(retry_at, full_at + FULL_PROBE_INTERVAL)
+            if (record.get('source') == source and retry_at > self.b.clock()):
                 return result('waiting', 'metadata_probe_backoff')
             self.remaining -= 1
             before = self.b.pinepods.inspect_episode_metadata(mapping['feed_url'], mapping['enclosure_url'], mapping['duration'])
@@ -303,8 +325,8 @@ class PineMetadataRepair:
                 reason = evidence.get('reason', '') if isinstance(evidence, dict) else ''
                 if reason in ('probe_cycle_budget', 'full_probe_cycle_budget'):
                     return result('waiting', 'metadata_repair_cycle_budget')
-                if reason == 'full_probe_daily_budget':
-                    return self._defer(key, source, 'metadata_full_probe_daily_limit',
+                if reason == 'full_probe_cooldown':
+                    return self._defer(key, source, 'metadata_full_probe_cooldown',
                                        delay=max(1, evidence['next_full_probe_at'] - self.b.clock()))
                 delay = 900 if reason in ('probe_timeout', 'probe_failed', 'probe_process_failed') else 86400
                 return self._defer(key, source, 'audio_header_unverified', delay=delay, evidence=evidence)

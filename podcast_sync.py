@@ -393,6 +393,7 @@ class PodcastCoordinator:
         self.history = pine_history_ids(bridge)
         self.metadata_repair = None
         self.variant_checker = None
+        self.feed_resolver = None
 
     def variant_proof(self, mapping, *, refresh=False, apply=False):
         from podcast_review import PREFIX, reported_proof
@@ -471,7 +472,11 @@ class PodcastCoordinator:
         from pine_identity_alias import candidate_route, resolve_alias, verify_source_history, AliasError
         record=self.alias_record(mapping)
         if record is None:
-            return {'feed_url':mapping['feed_url'],'enclosure_url':mapping['enclosure_url'],
+            from pine_feed_route import ReviewedFeeds
+            if self.feed_resolver is None:
+                self.feed_resolver = ReviewedFeeds(self.b, self.pine)
+            feed = self.feed_resolver.resolve(mapping)
+            return {'feed_url':feed,'enclosure_url':mapping['enclosure_url'],
                     'duration':mapping['duration'],'alias_fingerprint':None}
         candidate=candidate_route(record,mapping,abs_guid=mapping.get('abs_guid'),account=self.pine.identity)
         # The old URL namespace is immutable after approval. New/reset/deleted
@@ -557,7 +562,7 @@ class PodcastCoordinator:
             raise ValueError('Podcast episode media changed')
         if mapping.get('_pine_selected', bool(self.pine)) and (fresh['feed_url'], fresh['enclosure_url']) != (mapping['feed_url'], mapping['enclosure_url']):
             raise ValueError('Podcast feed or episode URL changed')
-        if self.pine and self.alias_record(mapping) is not None and fresh.get('abs_guid')!=mapping.get('abs_guid'):
+        if self.pine and (self.alias_record(mapping) is not None or mapping.get('_pine_reviewed_feed')) and fresh.get('abs_guid')!=mapping.get('abs_guid'):
             raise ValueError('Reviewed PinePods alias RSS GUID changed')
 
     def read(self, mapping):
@@ -990,6 +995,7 @@ class PodcastCoordinator:
     def cycle(self, apply=False, settle=30):
         self.metadata_repair = None
         self.variant_checker = None
+        self.feed_resolver = None
         guard(self.b)
         if self.pine: self.accounts['pinepods']=self.pine.identity
         self.account_guard(apply)
