@@ -1,6 +1,6 @@
 # Books & Audio
 
-**Öffentliche Beta · v0.1.0-beta.3**
+**Öffentliche Beta · v0.1.0-beta.4**
 
 Unter **Podcasts → Einstellungen → Primäre Podcastquelle** kannst du PinePods, Audiobookshelf oder Jellyfin bevorzugen. Bei widersprüchlichen Anfangsständen oder gleichzeitig geänderten Hörständen wird der vorhandene, geänderte Stand dieser Quelle übernommen. Eindeutige neue Änderungen anderer Apps werden weiterhin synchronisiert. Ohne Auswahl bleibt die bisherige Konfliktprüfung aktiv; ein Update aktiviert keine Bevorzugung. Die Einstellung synchronisiert keine Abonnements und ersetzt keine eindeutige Folgenzuordnung. BookOrbit-Podcasts bleiben vorbereitet und inaktiv.
 
@@ -54,3 +54,7 @@ python -m unittest discover
 ```
 
 Die Tests verwenden synthetische Bibliotheken und simulierte Dienstantworten. Für Fehlerberichte sind Dienstversionen, Medium und die Meldung aus der Oberfläche hilfreich. Zugangsdaten und persönliche Bibliotheksdaten bitte weglassen.
+
+### Podcast-Tracking mit originalem Floppy
+
+Der optionale private GPodder-Trackingdienst übernimmt neue PinePods-Hörereignisse mit dauerhaftem Importstand. Er schützt auch bei erneuten Vollanfragen des Original-Importers vor einer Wiederholung der gesamten Historie. Anleitung und Datenfluss: [TRACKING.md](TRACKING.md), Compose-Vorlage: [compose.tracking.yaml](compose.tracking.yaml).

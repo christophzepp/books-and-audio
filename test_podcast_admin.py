@@ -38,7 +38,7 @@ class PodcastAdminTests(Fixture):
             return dict(ok=True,mapped=4,episodes=[dict(title='Podcast',feed='https://private/?token=SECRET')])
         with patch.dict('sys.modules',{'podcast_sync':SimpleNamespace(preview=preview)}),patch.object(CandidateBridge,'guard',side_effect=AssertionError('BookOrbit must not be consulted')):
             result=self.podcast()
-        self.assertEqual(result['status'],'success');self.assertEqual(result['result']['preview'],dict(ok=True,mapped=4))
+        self.assertEqual(result['status'],'success');self.assertEqual(result['result']['preview'],dict(ok=True,mapped=4,scope=dict(episodes=1,position=0,status_only=0,waiting=0,blocked=0,proposed=0)))
         self.assertFalse(result['result']['applied']);self.assertEqual(self.saved_state(),before)
         self.assertEqual(self.admin.manager.path.read_bytes(),raw);self.assertNotEqual(seen[0].root,self.root)
         self.assertFalse(seen[0].root.exists());self.assertNotIn('SECRET',json.dumps(result))
@@ -62,6 +62,29 @@ class PodcastAdminTests(Fixture):
         with patch.dict('sys.modules', {'podcast_sync': SimpleNamespace(preview=preview)}):
             self.assertEqual(self.podcast(False,primary_source='jf')['status'],'success')
         self.assertEqual(seen,['jf']);self.assertEqual(self.admin.manager.path.read_bytes(),before)
+
+    def test_primary_only_change_retains_existing_identity_lock_without_approving_it(self):
+        from pinepods_client import EpisodeUnavailable
+        import copy
+        with patch.dict('sys.modules', {'podcast_sync': SimpleNamespace(preview=lambda b:dict(ok=True,mapped=1))}):
+            self.assertEqual(self.podcast(True)['status'],'success')
+        reason=EpisodeUnavailable.REASONS['duration_mismatch']
+        row=dict(id='_podcast:a',pine_reason_code='duration_mismatch',pine_status='blocked',
+                 progress_status='blocked',reason=reason,position=0,status='not_started',duration=100,
+                 states=dict(abs=dict(position=0,status='not_started'),jf=dict(position=0,status='not_started')))
+        result=dict(ok=False,mode='dry-run',enabled=True,mapped=1,scope_fingerprint='a'*64,
+                    episodes=[row],blocked=[dict(id='_podcast:a',reason=reason)])
+        def preview(b):return copy.deepcopy(result)
+        module=SimpleNamespace(preview=preview,pine_history_ids=lambda b:{'_podcast:a'})
+        before=self.saved_state()
+        with patch.dict('sys.modules',{'podcast_sync':module}):
+            checked=self.podcast(False,primary_source='jf')
+            self.assertEqual(checked['status'],'success')
+            self.assertEqual(checked['result']['preview']['retained_blocked'],1)
+            applied=self.podcast(True,primary_source='jf')
+            self.assertEqual(applied['status'],'success')
+            self.assertEqual(self.podcast(True,primary_source='abs',abs_library_id='different')['status'],'failed')
+        self.assertEqual(self.saved_state(),before)
 
     def test_inactive_preview_checks_scope_without_enabling_it(self):
         checked=[]
@@ -96,7 +119,7 @@ class PodcastAdminTests(Fixture):
     def test_preview_preserves_only_safe_pine_counts(self):
         preview=lambda b:dict(ok=True,mapped=2,pine_waiting=1,pine_enrolled=1,pine_joining='SECRET',episodes=[{'pine_reason':'SECRET'}])
         with patch.dict('sys.modules',{'podcast_sync':SimpleNamespace(preview=preview)}):result=self.podcast()
-        self.assertEqual(result['result']['preview'],dict(ok=True,mapped=2,pine_waiting=1,pine_enrolled=1))
+        self.assertEqual(result['result']['preview'],dict(ok=True,mapped=2,pine_waiting=1,pine_enrolled=1,scope=dict(episodes=1,position=0,status_only=0,waiting=0,blocked=0,proposed=0)))
         self.assertNotIn('SECRET',json.dumps(result))
 
     def test_variant_status_mode_is_explicit_typed_and_preserved_by_older_clients(self):

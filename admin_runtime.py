@@ -331,9 +331,39 @@ class Administration:
                 candidate = self.bridge_type(path, cfg, creds)
                 import podcast_sync
                 result = podcast_sync.preview(candidate)
-                if not isinstance(result, dict) or result.get('ok') is not True: raise ValueError('podcast_not_ready')
+                retained = 0
+                if not isinstance(result, dict): raise ValueError('podcast_not_ready')
+                if result.get('ok') is not True:
+                    # A preference-only change may retain the very same identity
+                    # locks; it cannot grant them progress access or change scope.
+                    previous, previous_creds, _ = self.manager.effective()
+                    previous = self.podcast_effective(previous)
+                    if self.folders: previous = self.folders.effective(previous)
+                    old, new = copy.deepcopy(previous), copy.deepcopy(cfg)
+                    old.setdefault('podcasts', {}).setdefault('primary_source', 'auto')
+                    new.setdefault('podcasts', {}).setdefault('primary_source', 'auto')
+                    old_primary = old['podcasts'].pop('primary_source')
+                    new_primary = new['podcasts'].pop('primary_source')
+                    if old != new or old_primary == new_primary or previous_creds != creds:
+                        raise ValueError('podcast_not_ready')
+                    other = None
+                    try:
+                        other = self.bridge_type(path, previous, creds)
+                        before_result = podcast_sync.preview(other)
+                        from podcast_sync import pine_history_ids
+                        enrolled = pine_history_ids(candidate)
+                        if variant_activation_signature(before_result, enrolled) != variant_activation_signature(result, enrolled):
+                            raise ValueError('podcast_not_ready')
+                        retained = len(result['blocked'])
+                    finally: close_bridge(other)
                 # Feed/enclosure addresses can contain private subscription tokens.
                 public = {key: copy.deepcopy(result[key]) for key in ('ok', 'mapped', 'message') if key in result}
+                from podcast_scope import public_scope
+                public['scope'] = public_scope(result)
+                public['ok'] = True
+                if retained:
+                    public['retained_blocked'] = retained
+                    public['message'] = f'Primärquelle geprüft; {retained} bestehende Folgensperren bleiben erhalten.'
                 for key in ('pine_waiting', 'pine_enrolled', 'pine_joining', 'pine_blocked'):
                     if type(result.get(key)) is int and result[key] >= 0:
                         public[key] = result[key]

@@ -1,0 +1,27 @@
+# Optionaler, privater PinePods -> Floppy-Import. Kein veröffentlichter Host-Port.
+# Das externe Netzwerk muss dem Netzwerk der vorhandenen Floppy-Installation entsprechen.
+services:
+  tracking:
+    image: ${BOOKS_AUDIO_IMAGE:-ghcr.io/christophzepp/books-and-audio:beta}
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [python, gpodder_relay.py]
+    volumes:
+      - ./tracking/config.json:/tracking/config.json:ro
+      - ./tracking/state:/tracking/state
+    networks:
+      floppy:
+        aliases: [books-audio-tracking]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8791/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+networks:
+  floppy:
+    external: true
+    name: ${FLOPPY_NETWORK:-floppy-network}
