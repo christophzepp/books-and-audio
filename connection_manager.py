@@ -62,7 +62,7 @@ LIMIT = 32 * 1024 * 1024
 
 PODCAST_DEFAULTS = dict(enabled=False, abs_library_id='', jellyfin_library_id='', pinepods_enabled=False,
                        bookorbit_enabled=False, pinepods_optional_enrollment=False,
-                       pinepods_variant_status_only=False)
+                       pinepods_variant_status_only=False, primary_source='auto')
 
 
 def podcast_settings(cfg):
@@ -76,6 +76,7 @@ def variant_flag_only_enable(previous, candidate):
     old=copy.deepcopy(previous);new=copy.deepcopy(candidate)
     before=old.get('podcasts');after=new.get('podcasts')
     if not isinstance(before,dict) or not isinstance(after,dict):return False
+    before.setdefault('primary_source', 'auto');after.setdefault('primary_source', 'auto')
     flag='pinepods_variant_status_only'
     if (before.get(flag,False) is not False or after.get(flag) is not True
             or any(before.get(k) is not True or after.get(k) is not True
@@ -445,7 +446,7 @@ class ConnectionManager:
                 requested = payload['settings']
                 optional = 'pinepods_optional_enrollment'
                 variant = 'pinepods_variant_status_only'
-                required = set(PODCAST_DEFAULTS) - {optional, variant}
+                required = set(PODCAST_DEFAULTS) - {optional, variant, 'primary_source'}
                 if (not isinstance(requested, dict) or not required.issubset(requested)
                         or set(requested) - set(PODCAST_DEFAULTS)):
                     _fail('invalid_podcast_settings')
@@ -454,6 +455,12 @@ class ConnectionManager:
                 # implicitly when upgrading an existing configuration.
                 requested.setdefault(optional, old['base_config'].get('podcasts', {}).get(optional, False))
                 requested.setdefault(variant, old['base_config'].get('podcasts', {}).get(variant, False))
+                requested.setdefault('primary_source', old['base_config'].get('podcasts', {}).get('primary_source', 'auto'))
+                from podcast_policy import validate_primary
+                try: validate_primary(requested['primary_source'])
+                except ValueError: _fail('invalid_podcast_primary_source')
+                if requested['primary_source'] == 'pinepods' and not requested['pinepods_enabled']:
+                    _fail('podcast_primary_pinepods_disabled')
                 for key in ('enabled', 'pinepods_enabled', 'bookorbit_enabled', optional, variant):
                     if type(requested[key]) is not bool: _fail('invalid_podcast_settings')
                 if requested['bookorbit_enabled']: _fail('bookorbit_podcasts_not_ready')

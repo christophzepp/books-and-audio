@@ -15,6 +15,7 @@ import uuid
 
 from jellyfin_audio import TICKS, rows_equal
 from pinepods_client import action_epoch
+from podcast_policy import validate_primary, preferred_change
 
 NAMESPACE = '_podcast_status:'
 STATUSES = frozenset(('not_started', 'in_progress', 'finished'))
@@ -63,8 +64,9 @@ def pending(bridge, mapping_id):
         "SELECT 1 FROM operations WHERE book=? AND status='pending' LIMIT 1", (key,)).fetchone())
 
 
-def choose_status(states, baseline=None, raw=None, previous=None):
+def choose_status(states, baseline=None, raw=None, previous=None, *, primary_source='auto'):
     """Choose status edges only; never infer recency from different clocks."""
+    validate_primary(primary_source)
     if set(states) != {'abs','jf','pinepods','gpodder'}:
         raise StatusConflict('variant_identity_changed')
     if any(value.get('status') not in STATUSES for value in states.values()):
@@ -95,7 +97,10 @@ def choose_status(states, baseline=None, raw=None, previous=None):
     changed = ([name for name in states if states[name]['status'] != baseline[name]['status']]
                if baseline else [name for name in states if states[name]['status'] != 'not_started'])
     if not changed or len({states[name]['status'] for name in changed}) != 1:
-        raise StatusConflict('variant_concurrent_status_change' if baseline else 'variant_initial_status_conflict')
+        preferred = preferred_change(states, changed, primary_source)
+        if preferred is None:
+            raise StatusConflict('variant_concurrent_status_change' if baseline else 'variant_initial_status_conflict')
+        changed = [preferred]
     source = changed[0]
     if states[source]['status'] == 'not_started' and (not baseline or states[source].get('missing')):
         raise StatusConflict('variant_progress_missing')
@@ -243,7 +248,8 @@ class StatusCoordinator:
                 raise StatusConflict('variant_concurrent_status_change')
             source = 'user' if 'target' in decision else decision['peer']
         else:
-            source=choose_status(states,stored.get('baseline'),raw,stored.get('raw'))
+            source=choose_status(states,stored.get('baseline'),raw,stored.get('raw'),
+                                 primary_source=self.c.cfg.get('primary_source', 'auto'))
         if source is None:
             if apply:
                 if not stored.get('enrolled'):

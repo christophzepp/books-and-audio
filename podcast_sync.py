@@ -18,6 +18,7 @@ import uuid
 
 from jellyfin_audio import TICKS, choose, rows_equal, same
 from pinepods_client import action_epoch, EpisodeUnavailable
+from podcast_policy import validate_primary, preferred_change
 
 NAMESPACE = '_podcast:'
 PINE_REASONS = {
@@ -120,6 +121,9 @@ def settings(bridge):
     cfg = bridge.config.get('podcasts', {})
     if not isinstance(cfg, dict) or type(cfg.get('enabled', False)) is not bool:
         raise ValueError('Invalid podcast configuration')
+    primary = validate_primary(cfg.get('primary_source', 'auto'))
+    if primary == 'pinepods' and not cfg.get('pinepods_enabled'):
+        raise ValueError('Primary PinePods source must participate in podcast synchronization')
     if not cfg.get('enabled'):
         return cfg
     for name in ('abs_library_id', 'jellyfin_library_id'):
@@ -334,13 +338,14 @@ def service_unavailable(error):
     return False
 
 
-def choose_source(states, baseline, raw=None, previous_raw=None):
+def choose_source(states, baseline, raw=None, previous_raw=None, *, primary_source='auto'):
     """Choose changes against a baseline, including explicit zero-position resets.
 
     An absent record is never a reset. A Go gpodder play updates native seconds
     but not the completion flag; recognize precisely that documented echo only
     after we already observed the previous native and action-log states.
     """
+    validate_primary(primary_source)
     if baseline:
         for name, old in baseline.items():
             if name in states and states[name].get('missing') and old['status'] != 'not_started':
@@ -367,7 +372,10 @@ def choose_source(states, baseline, raw=None, previous_raw=None):
              [k for k,value in states.items() if value['status']!='not_started'])
     if not changed: raise ValueError('Podcast sources differ without a recorded change')
     if not all(same(states[changed[0]],states[k]) for k in changed):
-        raise ValueError('Concurrent podcast progress conflict')
+        preferred = preferred_change(states, changed, primary_source)
+        if preferred is None:
+            raise ValueError('Concurrent podcast progress conflict')
+        changed = [preferred]
     if states[changed[0]]['status']=='not_started' and (not baseline or states[changed[0]].get('missing')):
         raise ValueError('Missing podcast progress cannot request a reset')
     return changed[0]
@@ -762,7 +770,8 @@ class PodcastCoordinator:
         if manual:
             if manual.get('snapshot')!=fingerprint(raw):raise ValueError('Hörstand seit der manuellen Auswahl geändert. Bitte erneut prüfen.')
             source=None if all(same(v,manual['goal']) for v in states.values()) else 'user'
-        else:source = choose_source(states, stored.get('baseline'), raw, stored.get('pine_raw'))
+        else:source = choose_source(states, stored.get('baseline'), raw, stored.get('pine_raw'),
+                                   primary_source=self.cfg.get('primary_source', 'auto'))
         if source is None:
             if apply: self.save_baseline(key, expected_identity, states, raw)
             return 'unchanged', states

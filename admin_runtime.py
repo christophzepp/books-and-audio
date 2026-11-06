@@ -614,6 +614,8 @@ def connection_error(code):
         'podcast_pinepods_missing': 'Bitte zuerst ein PinePods-Profil mit bestehendem GPodder-Gerät prüfen und aktivieren.',
         'bookorbit_podcasts_not_ready': 'BookOrbit-Podcasts sind vorbereitet und bleiben bis zur verifizierten Unterstützung inaktiv.',
         'invalid_podcast_settings': 'Bitte Podcast-Bibliotheken und Teilnehmer prüfen.',
+        'invalid_podcast_primary_source': 'Bitte eine verfügbare primäre Podcastquelle auswählen.',
+        'podcast_primary_pinepods_disabled': 'PinePods muss am Podcast-Abgleich teilnehmen, bevor es als primäre Quelle ausgewählt werden kann.',
         'podcast_not_ready': 'Podcast-Abgleich noch nicht bereit. Bibliotheken, Ordner, Konten und offene Übertragungen prüfen.',
         'bookbridge_writers_active': 'BookBridge schreibt noch Fortschritte. Bitte dort zuerst den Audiobookshelf- und BookOrbit-Abgleich ausschalten; erst danach kann dieses Profil getrennt, ersetzt oder entfernt werden.',
     }
@@ -735,6 +737,7 @@ def public_podcasts(value, config, paused):
         bookorbit='prepared', pinepods_enabled=config.get('pinepods_enabled') is True,
         pinepods_optional_enrollment=config.get('pinepods_optional_enrollment') is True,
         pinepods_variant_status_only=config.get('pinepods_variant_status_only') is True,
+        primary_source=config.get('primary_source', 'auto'),
         pine_status_only=sum(row.get('pine_mode') == 'status_only' and row.get('pine_status') == 'enrolled' for row in episodes),
         pine_waiting=sum(row.get('pine_status') == 'waiting' for row in episodes),
         pine_enrolled=sum(row.get('pine_status') == 'enrolled' for row in episodes),

@@ -43,6 +43,26 @@ class PodcastAdminTests(Fixture):
         self.assertEqual(self.admin.manager.path.read_bytes(),raw);self.assertNotEqual(seen[0].root,self.root)
         self.assertFalse(seen[0].root.exists());self.assertNotIn('SECRET',json.dumps(result))
 
+    def test_primary_source_is_validated_persisted_and_preserved_for_older_clients(self):
+        self.assertEqual(self.admin.manager.public()['podcasts']['primary_source'], 'auto')
+        with patch.dict('sys.modules', {'podcast_sync': SimpleNamespace(preview=lambda b:dict(ok=True,mapped=2))}):
+            for invalid in (None, [], 'bo', 'gpodder'):
+                self.assertEqual(self.podcast(True,primary_source=invalid)['status'], 'failed')
+            self.assertEqual(self.podcast(True,primary_source='pinepods')['status'], 'failed')
+            for primary in ('abs', 'jf', 'auto'):
+                self.assertEqual(self.podcast(True,primary_source=primary)['status'], 'success')
+                self.assertEqual(self.admin.manager.effective()[0]['podcasts']['primary_source'],primary)
+                self.assertEqual(self.podcast(True)['status'], 'success')
+                self.assertEqual(self.admin.manager.public()['podcasts']['primary_source'],primary)
+
+    def test_primary_preview_does_not_change_live_settings(self):
+        before=self.admin.manager.path.read_bytes(); seen=[]
+        def preview(bridge):
+            seen.append(bridge.config['podcasts']['primary_source']);return dict(ok=True,mapped=2)
+        with patch.dict('sys.modules', {'podcast_sync': SimpleNamespace(preview=preview)}):
+            self.assertEqual(self.podcast(False,primary_source='jf')['status'],'success')
+        self.assertEqual(seen,['jf']);self.assertEqual(self.admin.manager.path.read_bytes(),before)
+
     def test_inactive_preview_checks_scope_without_enabling_it(self):
         checked=[]
         def preview(bridge):

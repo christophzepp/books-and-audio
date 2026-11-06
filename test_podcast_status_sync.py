@@ -107,6 +107,14 @@ class StatusTests(unittest.TestCase):
         self.setup_variant();self.abs.set(200);self.jf.set(200);self.pine.set(600,'finished');r=self.cycle()
         self.assertTrue(r['blocked']);self.assertFalse(self.pine.writes)
         self.assertEqual(r['episodes'][0]['pine_status_reason_code'],'variant_initial_status_conflict')
+
+    def test_primary_pinepods_resolves_initial_variant_status_conflict(self):
+        self.setup_variant();self.cfg['podcasts']['primary_source']='pinepods'
+        self.abs.set(200);self.jf.set(200);self.pine.set(600,'finished');self.settle_all()
+        self.assertTrue(self.abs.raw['isFinished'])
+        self.assertEqual(self.abs.raw['currentTime'],200)
+        self.assertTrue(self.jf.row['UserData']['Played'])
+        self.assertEqual(self.pine.position,600)
     def test_concurrent_edges_conflict(self):
         self.setup_variant();self.abs.set(200);self.jf.set(200);self.pine.set(20,'in_progress');self.okay(self.cycle())
         self.abs.set(1000,True);self.pine.set(0,'not_started');r=self.cycle();self.assertTrue(r['blocked']);self.assertFalse(self.pine.writes)
