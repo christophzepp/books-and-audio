@@ -241,6 +241,19 @@ class PodcastAdminTests(Fixture):
         self.assertEqual(result['episodes'][0]['pine_reason'],'Die PinePods-Zuordnung ist noch nicht bestätigt.')
         self.assertIn('gesperrt',result['episodes'][1]['pine_reason'])
 
+    def test_changed_variant_identity_exposes_explicit_editor_without_approving_it(self):
+        rows=[dict(id='_podcast:show:'+code,progress_status='blocked',pine_status='blocked',
+                   pine_mode='status_only',pine_status_reason_code=code,reviewed_route=False)
+              for code in ('variant_identity_changed','variant_proof_stale','variant_pending_review')]
+        rows.append(dict(rows[0],id='unmapped'))
+        result=runtime.public_podcasts(dict(episodes=rows),dict(self.settings,pinepods_enabled=True),False)
+        for row in result['episodes'][:2]:
+            self.assertTrue(row['can_edit_status'])
+            self.assertFalse(row['can_review'])
+            self.assertEqual(row['status'],'blocked')
+        self.assertFalse(result['episodes'][2]['can_edit_status'])
+        self.assertFalse(result['episodes'][3]['can_edit_status'])
+
     def test_pause_preserves_pine_admission_information_without_core_success(self):
         row = dict(id='episode',status='in_progress',progress_status='unchanged',participants=['abs','jf'],pine_status='joining')
         result = runtime.public_podcasts(dict(episodes=[row]),self.settings,True)

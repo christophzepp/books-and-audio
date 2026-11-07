@@ -700,7 +700,8 @@ def public_podcasts(value, config, paused):
                 'variant_full_enrollment_review','variant_initial_status_conflict','variant_concurrent_status_change'}))
         item['can_edit_status'] = bool(item.get('id') and str(item['id']).startswith('_podcast:') and
             (row.get('pine_status') in {'waiting','joining'} or item['status']=='waiting' or row.get('pine_reason_code') in
-             {'episode_identity_unresolved','feed_missing','episode_missing','media_identity_mismatch'} or row.get('reviewed_route')))
+             {'episode_identity_unresolved','feed_missing','episode_missing','media_identity_mismatch'}
+             or row.get('pine_status_reason_code') in ('variant_identity_changed','variant_proof_stale') or row.get('reviewed_route')))
         peers = row.get('participants', [])
         if isinstance(peers, dict): peers = list(peers)
         item['participants'] = [peer for peer in peers if peer in {'abs', 'jf', 'pinepods', 'gpodder', 'bo'}] if isinstance(peers, list) else []

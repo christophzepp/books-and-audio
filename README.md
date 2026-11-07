@@ -1,6 +1,6 @@
 # Books & Audio
 
-**Öffentliche Beta · v0.1.0-beta.5**
+**Öffentliche Beta · v0.1.0-beta.6**
 
 Unter **Podcasts → Einstellungen → Primäre Podcastquelle** kannst du PinePods, Audiobookshelf oder Jellyfin bevorzugen. Bei widersprüchlichen Anfangsständen oder gleichzeitig geänderten Hörständen wird der vorhandene, geänderte Stand dieser Quelle übernommen. Eindeutige neue Änderungen anderer Apps werden weiterhin synchronisiert. Ohne Auswahl bleibt die bisherige Konfliktprüfung aktiv; ein Update aktiviert keine Bevorzugung. Die Einstellung synchronisiert keine Abonnements und ersetzt keine eindeutige Folgenzuordnung. BookOrbit-Podcasts bleiben vorbereitet und inaktiv.
 
