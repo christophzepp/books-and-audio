@@ -80,13 +80,14 @@ jobs:
           docker buildx imagetools inspect --raw "$IMAGE:$version" | jq -e '([.manifests[].platform | select(.os=="linux") | .architecture] | sort) == ["amd64","arm64"]'
           tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
           if [[ "$tip" == "$GITHUB_SHA" ]]; then
-            docker buildx imagetools create -t "$IMAGE:beta" "$IMAGE:$version"
+            docker buildx imagetools create -t "$IMAGE:beta" -t "$IMAGE:tracking-beta" "$IMAGE:$version"
           fi
           cp compose.dockge.yaml "$RUNNER_TEMP/compose.yaml"
+          cp compose.tracking.yaml "$RUNNER_TEMP/compose.tracking.yaml"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$RUNNER_TEMP/compose.yaml" --clobber
+            gh release upload "$tag" "$RUNNER_TEMP/compose.yaml" "$RUNNER_TEMP/compose.tracking.yaml" --clobber
           else
-            gh release create "$tag" "$RUNNER_TEMP/compose.yaml" --target "$GITHUB_SHA" --prerelease \
+            gh release create "$tag" "$RUNNER_TEMP/compose.yaml" "$RUNNER_TEMP/compose.tracking.yaml" --target "$GITHUB_SHA" --prerelease \
               --title "Books & Audio $version" \
-              --notes "Fertiges Docker-Image für Linux auf AMD64 und ARM64: \`$IMAGE:$version\`. Für laufende Beta-Updates den Tag \`beta\` verwenden. Die angehängte compose.yaml lässt sich direkt in Dockge einfügen. [Einrichtung und Updates](https://github.com/$GITHUB_REPOSITORY/blob/$tag/DOCKGE.md)."
+              --notes "Fertiges Docker-Image für Linux auf AMD64 und ARM64: \`$IMAGE:$version\`. Für laufende Updates des Hauptdienstes \`beta\`, für den optionalen PinePods-Floppy-Trackingdienst \`tracking-beta\` verwenden. Die angehängte compose.yaml installiert den Hauptdienst, compose.tracking.yaml den separaten Trackingdienst. [Einrichtung und Updates](https://github.com/$GITHUB_REPOSITORY/blob/$tag/DOCKGE.md) · [Tracking einrichten](https://github.com/$GITHUB_REPOSITORY/blob/$tag/TRACKING.md)."
           fi
