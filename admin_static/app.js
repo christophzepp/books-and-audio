@@ -15,7 +15,21 @@ function bytes(value){if(!Number.isFinite(Number(value)))return 'Größe unbekan
 function describe(value){if(value===null||value===undefined)return '';if(typeof value==='string')return value;if(Array.isArray(value))return value.map(describe).filter(Boolean).join('\n');if(typeof value==='object')return Object.entries(value).map(([key,item])=>key+': '+describe(item)).join('\n');return String(value);}
 function toast(message,error=false){clearTimeout(toastTimer);text('toast',message);$('toast').className='toast'+(error?' error':'');$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,6500);}
 function notice(message,error=false){text('global-message',message);$('global-message').hidden=!message;$('global-message').className='notice'+(error?' error':'');}
-async function api(path,body){const options={credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}};if(body!==undefined){options.method='POST';options.headers['Content-Type']='application/json';options.headers['X-CSRF-Token']=cookie('sync_admin_csrf');options.body=JSON.stringify(body);}const response=await fetch(path,options);let data;try{data=await response.json();}catch{throw new Error('Der Server hat keine lesbare Antwort gesendet.');}if(!response.ok){if(response.status===401&&!['/api/login','/api/setup'].includes(path)){state.authenticated=false;showAuth();}const error=new Error(data.error||'Die Anfrage konnte nicht ausgeführt werden.');error.status=response.status;throw error;}return data;}
+async function api(path,body){
+  const options={credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}};
+  if(body!==undefined){options.method='POST';options.headers['Content-Type']='application/json';options.headers['X-CSRF-Token']=cookie('sync_admin_csrf');options.body=JSON.stringify(body);}
+  let response;
+  try{response=await fetch(path,options);}
+  catch{
+    const error=new Error('Books & Audio ist nicht erreichbar. Prüfe die Serveradresse und deine Netzwerkverbindung.');
+    error.network=true;
+    throw error;
+  }
+  let data;
+  try{data=await response.json();}catch{throw new Error('Der Server hat keine lesbare Antwort gesendet.');}
+  if(!response.ok){if(response.status===401&&!['/api/login','/api/setup'].includes(path)){state.authenticated=false;showAuth();}const error=new Error(data.error||'Die Anfrage konnte nicht ausgeführt werden.');error.status=response.status;throw error;}
+  return data;
+}
 function showAuth(){document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());$('connection-form').reset();state.review=null;state.episodeReview=null;state.editing=null;state.podcastDirty=false;$('podcast-form').reset();state.status={};state.connections={revision:0,profiles:[],schemas:{}};state.events=[];['service-list','connection-list','review-books','review-book-options','review-podcasts','attention-books','attention-podcasts','podcast-rows','event-list','recent-events','review-files','connection-fields','book-rows','book-empty'].forEach(id=>clear($(id)));$('app-screen').hidden=true;$('auth-screen').hidden=false;$('setup-token-row').hidden=state.initialized;$('confirmation-row').hidden=state.initialized;text('auth-title',state.initialized?'Willkommen zurück':'Dein privater Sync-Zugang');text('auth-description',state.initialized?'Melde dich an, um Verbindungen und Freigaben zu verwalten.':'Lege einen eigenen Zugang für diese Verwaltung an. Der einmalige Einrichtungscode stammt aus der Server-Einrichtung.');text('auth-submit',state.initialized?'Anmelden':'Zugang anlegen');$('auth-password').autocomplete=state.initialized?'current-password':'new-password';$('auth-password').minLength=state.initialized?1:12;}
 async function session(){const result=await api('/api/session');state.initialized=result.initialized;state.authenticated=result.authenticated;if(!state.authenticated){showAuth();return false;}$('auth-screen').hidden=true;$('app-screen').hidden=false;return true;}
 $('auth-form').addEventListener('submit',async event=>{event.preventDefault();text('auth-error','');$('auth-submit').disabled=true;try{const body={username:$('auth-username').value,password:$('auth-password').value};if(!state.initialized){body.token=$('setup-token').value.trim();body.confirmation=$('auth-confirmation').value;}await api(state.initialized?'/api/login':'/api/setup',body);$('auth-form').reset();await session();await refresh();}catch(error){text('auth-error',error.message);}finally{$('auth-submit').disabled=false;}});
@@ -235,13 +249,13 @@ function episodeReviewButton(row){
 async function previewEpisode(id,editable){
   try{
     const result=await runCommand(editable?'episode.status_preview':'episode.preview',{episode_id:id});
-    state.episodeReview=result;$('episode-detail-help').hidden=Boolean(result.editable);text('episode-approve',result.editable?'Auswahl übernehmen':'Statusabgleich freigeben');
+    state.episodeReview=result;$('episode-detail-help').hidden=Boolean(result.editable);text('episode-approve',result.needs_identity_review?'Zuordnung neu bestätigen':result.editable?'Auswahl übernehmen':'Statusabgleich freigeben');
     text('episode-title',[result.show,result.title].filter(Boolean).join(' · '));
     text('episode-durations','Audiobookshelf / Jellyfin: '+durationLabel(result.duration)+(result.pine_duration?' · PinePods: '+durationLabel(result.pine_duration):' · PinePods nicht zugeordnet'));
     text('episode-mode',result.explanation|| (result.mode==='reported'?'Mit der Freigabe bestätigst du die von PinePods gemeldete Laufzeit für diese Fassung.':'Die abweichende Fassung wurde anhand der Audiodatei geprüft.'));
     const select=$('episode-source'),different=new Set(Object.values(result.states)).size>1;
     clear(select);clear($('episode-states'));text('episode-error','');
-    const placeholder=element('option','','Hörstatus auswählen …');placeholder.value='';select.append(placeholder);
+    const placeholder=element('option','',result.needs_identity_review?'Hörstatus für die Neuprüfung auswählen …':'Hörstatus auswählen …');placeholder.value='';select.append(placeholder);
     for(const [peer,status] of Object.entries(result.states)){
       const name=episodePeerNames[peer],label=episodeStatusNames[status];
       $('episode-states').append(element('dt','',name),element('dd','',result.missing?.includes(peer)?'Kein gespeicherter Hörstand':label));
