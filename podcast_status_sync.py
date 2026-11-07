@@ -152,6 +152,69 @@ def same_user_progress(left,right):
     return raw_equal(left,right)
 
 
+def reviewed_choice_matches(stored, states, raw, proof, binding):
+    """Validate an unplanned status choice while PinePods keeps playing.
+
+    A review chooses a status, not a frozen restart second.  Only the proven
+    native in-progress position and its derived revision hashes may change
+    before a plan exists.  Other peers, GPodder receipts, history presence,
+    completion, identity and audio-version evidence remain pinned.  Journaled
+    transfers and their read/write/readback comparisons never use this helper.
+    """
+    from podcast_sync import fingerprint
+    decision=stored.get('reviewed_source')
+    previous=stored.get('raw')
+    if (not isinstance(decision,dict) or not isinstance(previous,dict)
+            or stored.get('binding')!=binding or stored.get('version')!=version_receipt(proof)
+            or decision.get('snapshot')!=fingerprint(previous)):
+        return False
+    if set(decision)=={'target','snapshot'}:
+        if decision['target'] not in STATUSES:return False
+    elif set(decision)=={'peer','snapshot'}:
+        if decision['peer'] not in {'abs','jf','pinepods','gpodder'}:return False
+    else:return False
+    # Preserve the existing exact-snapshot behavior for all valid choices,
+    # including older choices without a complete semantic baseline.  A legacy
+    # choice without its raw/hash/binding/version evidence fails closed above.
+    if decision['snapshot']==fingerprint(raw):return True
+    baseline=stored.get('baseline')
+    peers={'abs','jf','pinepods','gpodder'}
+    if not isinstance(baseline,dict) or set(baseline)!=peers or set(states)!=peers:return False
+    for peer in peers:
+        old,new=baseline[peer],states[peer]
+        if (not isinstance(old,dict) or not isinstance(new,dict)
+                or old.get('status') not in STATUSES or old.get('status')!=new.get('status')
+                or type(old.get('missing',False))is not bool or type(new.get('missing',False))is not bool
+                or old.get('missing',False)!=new.get('missing',False)):
+            return False
+    if (decision.get('target')!='in_progress' and decision.get('peer')!='pinepods'
+            or states['pinepods']['status']!='in_progress'):
+        return False
+    if set(previous)!=set(raw) or not isinstance(previous.get('pinepods'),dict) or not isinstance(raw.get('pinepods'),dict):return False
+    old,new=previous['pinepods'],raw['pinepods']
+    for value in (old,new):
+        if (value.get('status')!='in_progress' or value.get('native_completed')is not False
+                or value.get('native_episode_id')!=proof['native_episode_id']
+                or value.get('native_user_id')!=proof['native_user_id']
+                or value.get('own_duration')!=proof['own_duration']):
+            return False
+        if any(not isinstance(value.get(field),str) or len(value[field])!=64
+               or any(char not in '0123456789abcdef' for char in value[field])
+               for field in ('native_revision','native_observed_revision','revision')):
+            return False
+        position=value.get('native_position')
+        if (type(position)not in (int,float) or not math.isfinite(position)
+                or not 0<position<=proof['own_duration'] or value.get('position')!=position):
+            return False
+    # Comparing the remaining serialized preimages keeps every unlisted field
+    # strict, including a new explicit GPodder reset or playback receipt.
+    previous=copy.deepcopy(previous);raw=copy.deepcopy(raw)
+    for value in (previous['pinepods'],raw['pinepods']):
+        for field in ('native_position','position','native_revision','native_observed_revision','revision'):
+            value.pop(field,None)
+    return fingerprint(previous)==fingerprint(raw)
+
+
 class StatusCoordinator:
     def __init__(self, coordinator):
         self.c, self.b, self.pine = coordinator, coordinator.b, coordinator.pine
@@ -244,7 +307,7 @@ class StatusCoordinator:
             return self.resume(mapping,key,stored,states,raw,proof,apply)
         decision = stored.get('reviewed_source')
         if decision:
-            if decision['snapshot'] != fingerprint(raw):
+            if not reviewed_choice_matches(stored,states,raw,proof,binding):
                 raise StatusConflict('variant_concurrent_status_change')
             source = 'user' if 'target' in decision else decision['peer']
         else:
@@ -272,6 +335,8 @@ class StatusCoordinator:
         fresh=self.refreshed(mapping,binding)
         if fresh is None:return 'waiting',states
         states,raw=self.read_renewed(mapping,proof,fresh,raw)
+        if decision and stored.get('version')!=version_receipt(fresh):
+            raise StatusConflict('variant_identity_changed')
         target=decision['target'] if decision and 'target' in decision else states[source]['status']
         plan=self.plan(mapping,fresh,states,raw,target)
         if not plan:raise StatusConflict('variant_pending_review')

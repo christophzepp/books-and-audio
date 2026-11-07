@@ -1,3 +1,11 @@
+## 0.1.0-beta.8 – Statusfreigaben während des Weiterhörens
+
+- Eine bestätigte Freigabe des PinePods-Status „angefangen“ bleibt vor der Planerstellung bei reiner PinePods-Sekundenbewegung und deren abgeleiteten Revisionen verwendbar. Die Statuswerte aller Teilnehmer und sämtliche übrigen Rohdaten müssen unverändert sein. Der bisherige Vergleich konnte eine Freigabe direkt nach dem Weiterhören erneut sperren.
+- Die Zuordnung zu Medien und Konten sowie die bestätigte Laufzeitversion bleiben gebunden. Zurücksetzen, Abschließen und verschwundene Hörstände werden weiterhin erkannt. Die strikten Prüfungen bei bereits geplanten Übertragungen und deren Rücklesekontrolle bleiben erhalten.
+- Bestehende Freigaben bleiben nur verwendbar, wenn ihr ursprünglicher Prüfnachweis noch zu den gespeicherten Ausgangsdaten passt. Es werden keine alten Fortschritte neu importiert und keine Sekunden zwischen verschiedenen Audiofassungen umgerechnet.
+
+Docker: `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.8` oder `beta`, für Linux AMD64 und ARM64. Das Update betrifft den Hauptdienst; der getrennte Trackingdienst kann auf Beta7 weiterlaufen. Bestehende Verbindungen, Freigaben und Fortschritte bleiben erhalten.
+
 ## 0.1.0-beta.7 – PinePods als zuverlässigere Quelle für Floppy
 
 - Der optionale Trackingdienst kann den nativen, kontogebundenen PinePods-Abschlussstatus und Hörfortschritt lesen. Damit erreichen auch Änderungen aus der originalen PinePods-Oberfläche den Import, wenn PinePods dafür keinen GPodder-Aktionseintrag erzeugt. Die geprüfte native Schnittstelle ist PinePods 0.9.0.
