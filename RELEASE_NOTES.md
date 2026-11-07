@@ -1,3 +1,14 @@
+## 0.1.0-beta.7 – PinePods als zuverlässigere Quelle für Floppy
+
+- Der optionale Trackingdienst kann den nativen, kontogebundenen PinePods-Abschlussstatus und Hörfortschritt lesen. Damit erreichen auch Änderungen aus der originalen PinePods-Oberfläche den Import, wenn PinePods dafür keinen GPodder-Aktionseintrag erzeugt. Die geprüfte native Schnittstelle ist PinePods 0.9.0.
+- Die erste vollständige native Bestandsaufnahme erzeugt keine Hörvorgänge aus der bisherigen Bibliothek. Bestehende Installationen behalten ihren Importstand und können einzeln geprüfte, bisher fehlende Folgen einmalig über `recovery_ids` übernehmen. Es gibt keinen pauschalen Wiederimport der Historie.
+- Spätere Änderungen werden dauerhaft gespeichert und bis zur Importbestätigung erneut angeboten. Ein neuer alter Katalog erzeugt allein keine Hörvorgänge. Bestätigte eigene Sync-Aktionen werden nicht als zweite Quelle gezählt; eine echte Änderung des nativen PinePods-Hörstands bleibt übertragbar.
+- Vor der Übergabe prüft der Dienst die genaue RSS-Folgenidentität. Nicht eindeutig auflösbare Ereignisse bleiben zur späteren Prüfung erhalten, statt ungeprüfte Ersatz-Metadaten an Floppy zu schicken. Der authentifizierte, lesende Endpunkt `/status` trennt Quellprüfung, offene Ereignisse und Transportbestätigung; er ersetzt keine Kontrolle der gespeicherten Floppy-Historie.
+- Originale PinePods-, Audiobookshelf- und Floppy-Versionen bleiben verwendbar. Floppy bleibt eine Hörhistorie: Das Zurücksetzen einer Folge in PinePods löscht keinen früheren Floppy-Hörvorgang.
+- Der separate Docker-Tag `tracking-beta` und die zusätzliche Release-Datei `compose.tracking.yaml` erlauben Updates des Tracking-Stacks über Dockge. Die bisherigen Verbindungen, Freigaben und Fortschritte des Hauptdienstes bleiben kompatibel. Für diese Tracking-Änderung muss ein laufender Hauptdienst auf Beta6 nicht neu erstellt werden.
+
+Docker: `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.7`, für Linux AMD64 und ARM64. Laufende Updates: `beta` für den Hauptdienst und `tracking-beta` für den optionalen Trackingdienst. Native Prüfung und Migration müssen gemäß [TRACKING.md](TRACKING.md) ausdrücklich eingerichtet werden; bestehende Konfigurationen ohne `native_source` bleiben im bisherigen Aktionsmodus.
+
 ## 0.1.0-beta.6 – Zuverlässigere Prüfungen und Wiederaufnahme
 
 - Bei reinen BookOrbit-Metadatenrevisionen wird nach Prüfung der Medienidentität auch die Jellyfin-Vergleichsbasis aktualisiert. Bereits veraltete Basen benötigen einen passenden historischen Revisionsnachweis. Hörstände bleiben erhalten; geänderte Medien und offene Übertragungen werden weiterhin geschützt.

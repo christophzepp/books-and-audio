@@ -38,8 +38,11 @@ def event_time(action):
 
 
 class Relay:
-    def __init__(self, config, root, request=requests.request):
+    def __init__(self, config, root, request=requests.request, *, source=None, resolver=None, clock=time.time):
         self.config, self.request = config, request
+        self.clock = clock
+        self.native_source = source
+        self.resolver = resolver
         upstream = urlsplit(config['upstream'])
         if (upstream.scheme not in ('http', 'https') or not upstream.hostname
                 or upstream.username or upstream.password or upstream.query or upstream.fragment):
@@ -66,6 +69,26 @@ class Relay:
             if old is None:
                 self.set(db, 'scope', scope); self.set(db, 'ack', baseline)
                 self.set(db, 'pending', None)
+            if config.get('native_source') is not None:
+                from tracking_projection import NativeProjection
+                NativeProjection.ensure_schema(db)
+                db.execute('CREATE TABLE IF NOT EXISTS native_tracking_superseded '
+                           '(event_id TEXT PRIMARY KEY, successor TEXT NOT NULL)')
+                native = config['native_source']
+                if not isinstance(native, dict): raise ValueError('invalid_native_tracking_source')
+                native_scope = encoded([self.upstream, self.username, native.get('user_id'),
+                                        native.get('server_version', '0.9.0')])
+                previous_scope = self.get(db, 'native_scope')
+                if previous_scope is not None and previous_scope != native_scope:
+                    raise ValueError('native_tracking_scope_changed')
+                self.set(db, 'native_scope', native_scope)
+                if self.native_source is None:
+                    from tracking_source import NativeTrackingSource
+                    self.native_source = NativeTrackingSource(dict(native, upstream=self.upstream,
+                        username=self.username, baseline=baseline))
+                if self.resolver is None:
+                    from tracking_rss import TrackingResolver
+                    self.resolver = TrackingResolver(config.get('aliases', []))
 
     def db(self):
         return sqlite3.connect(self.root / 'relay.sqlite', timeout=30)
@@ -115,6 +138,10 @@ class Relay:
                 raise ValueError('unknown_cursor')
             if pending:
                 return {'actions': pending['actions'], 'timestamp': pending['timestamp']}
+            if self.native_source is not None:
+                if device and device != 'books-audio-native':
+                    raise ValueError('native_tracking_device_filter_unsupported')
+                return self.native_actions(db, ack, authorization)
             params = {'since': max(self.config['baseline'], ack - 1), 'aggregated': 'false'}
             if device: params['device'] = device
             response = self.upstream_request('GET', '/api/2/episodes/' + quote(self.username, safe='') + '.json', authorization, params=params)
@@ -153,12 +180,86 @@ class Relay:
             self.set(db, 'last_poll', int(time.time()))
             return {'actions': output, 'timestamp': cursor}
 
+    def native_actions(self, db, ack, authorization):
+        """Project final source states once; transport ACKs never create plays.
+
+        Original GPodder actions are not a second source of history in this
+        mode. They may be receipts written by our playback synchronizer, and
+        PinePods' native UI does not reliably create them at all.
+        """
+        from tracking_projection import NativeProjection
+        snapshots = self.native_source.capture(authorization)
+        now = int(self.clock())
+        NativeProjection.update(db, snapshots, now,
+            recovery_ids=self.config.get('native_source', {}).get('recovery_ids', ()))
+        if hasattr(self.resolver, 'begin_poll'): self.resolver.begin_poll()
+        output, fingerprints, blocked = [], [], []
+        current = {row['id']: row for row in snapshots}
+        events = NativeProjection.events(db)
+        latest = {(e['_tracking_episode_id'], e['_tracking_generation']): e for e in events}
+        for event in events:
+            fingerprint = 'native:' + event['_tracking_event_id']
+            if db.execute('SELECT 1 FROM seen WHERE hash=?', (fingerprint,)).fetchone(): continue
+            if db.execute('SELECT 1 FROM native_tracking_superseded WHERE event_id=?',
+                          (event['_tracking_event_id'],)).fetchone(): continue
+            successor = latest[(event['_tracking_episode_id'], event['_tracking_generation'])]
+            if not event['_tracking_completed'] and successor['_tracking_event_id'] != event['_tracking_event_id']:
+                # Never-delivered intermediate progress is superseded by a
+                # newer state in this same listen. This is not a consumer ACK.
+                db.execute('INSERT INTO native_tracking_superseded VALUES(?,?)',
+                           (event['_tracking_event_id'], successor['_tracking_event_id']))
+                continue
+            wire = dict(event)
+            fresh = current.get(event['_tracking_episode_id'])
+            if fresh is None or fresh['podcast'] != event['podcast']:
+                blocked.append(event['_tracking_event_id']); continue
+            # The pinned native account/podcast/episode ID proves an enclosure
+            # refresh independently of titles and duration. Resolve its fresh
+            # URL against current RSS while preserving the original event time.
+            wire['episode'] = fresh['episode']
+            if not event['_tracking_completed']:
+                # Floppy infers completion five seconds before total. Preserve
+                # PinePods' explicit unfinished state in that representation;
+                # the journal retains the exact native seconds.
+                wire['position'] = min(event['position'], event['total'] - 6)
+                if int(wire['position']) <= 0:
+                    blocked.append(event['_tracking_event_id']); continue
+            try:
+                item = self.resolver.resolve(wire)
+            except (ValueError, requests.RequestException):
+                # Keep the immutable event in the outbox. A transport cursor
+                # cannot acknowledge an unresolved identity or discard it.
+                blocked.append(event['_tracking_event_id']); continue
+            item = {key: value for key, value in item.items() if not key.startswith('_tracking_')}
+            output.append(item); fingerprints.append(fingerprint)
+        cursor = max(now, ack + 1)
+        self.set(db, 'pending', dict(actions=output, timestamp=cursor, fingerprints=fingerprints))
+        self.set(db, 'last_poll', now)
+        self.set(db, 'native_scan', dict(at=now, episodes=len(snapshots),
+            source=getattr(self.native_source, 'last_status', {}), blocked=len(blocked)))
+        self.set(db, 'native_blocked', blocked)
+        return {'actions': output, 'timestamp': cursor}
+
     def status(self):
         with self.db() as db:
             pending = self.get(db, 'pending')
-            return dict(ok=True, baseline=self.config['baseline'], acknowledged=self.get(db, 'ack'),
+            result = dict(ok=True, mode='native-state' if self.native_source is not None else 'legacy-actions',
+                        baseline=self.config['baseline'], acknowledged=self.get(db, 'ack'),
                         pending_actions=len(pending['actions']) if pending else 0,
                         last_poll=self.get(db, 'last_poll'), seen=db.execute('SELECT count(*) FROM seen').fetchone()[0])
+            if self.native_source is not None:
+                from tracking_projection import NativeProjection
+                events = NativeProjection.events(db)
+                result.update(native_scan=self.get(db, 'native_scan'),
+                    blocked=len(self.get(db, 'native_blocked') or []),
+                    baseline_episodes=db.execute('SELECT count(*) FROM native_tracking_episodes').fetchone()[0],
+                    projected_events=len(events),
+                    superseded_events=db.execute('SELECT count(*) FROM native_tracking_superseded').fetchone()[0],
+                    outstanding_events=sum(not db.execute('SELECT 1 FROM seen WHERE hash=?',
+                        ('native:' + e['_tracking_event_id'],)).fetchone()
+                        and not db.execute('SELECT 1 FROM native_tracking_superseded WHERE event_id=?',
+                            (e['_tracking_event_id'],)).fetchone() for e in events))
+            return result
 
 
 def handler(relay):
@@ -180,6 +281,8 @@ def handler(relay):
                 username = quote(relay.username, safe='')
                 if self.command == 'POST' and parsed.path == '/api/2/auth/' + username + '/login.json':
                     result = {}
+                elif self.command == 'GET' and parsed.path == '/status':
+                    result = relay.status()
                 elif self.command == 'POST' and re.fullmatch('/api/2/devices/' + re.escape(username) + r'/[A-Za-z0-9_-]{1,100}\.json', parsed.path):
                     # Floppy's existing device is already configured upstream; no new writer.
                     result = {}

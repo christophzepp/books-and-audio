@@ -2,7 +2,7 @@
 # Das externe Netzwerk muss dem Netzwerk der vorhandenen Floppy-Installation entsprechen.
 services:
   tracking:
-    image: ${BOOKS_AUDIO_IMAGE:-ghcr.io/christophzepp/books-and-audio:beta}
+    image: ${BOOKS_AUDIO_TRACKING_IMAGE:-ghcr.io/christophzepp/books-and-audio:tracking-beta}
     restart: unless-stopped
     user: "1000:1000"
     init: true
@@ -13,6 +13,15 @@ services:
     volumes:
       - ./tracking/config.json:/tracking/config.json:ro
       - ./tracking/state:/tracking/state
+      # Für native_source in config.json erforderlich; vorher die private Datei
+      # mit Modus 0600 für UID 1000 anlegen und diesen Bind-Mount aktivieren.
+      # Ohne native_source bleibt der bisherige GPodder-Aktionsmodus verfügbar.
+      # - type: bind
+      #   source: ./tracking/pinepods-api.key
+      #   target: /tracking/pinepods-api.key
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false
     networks:
       floppy:
         aliases: [books-audio-tracking]
