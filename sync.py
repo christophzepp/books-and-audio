@@ -566,16 +566,109 @@ class Bridge:
         state.pop('candidate', None)
         return state
 
-    def _commit_revision(self, previous, updated, before_state, after_state):
+    def _jellyfin_revision_state(self, stored, updated, previous=None):
+        """Refresh only proven ABS/BO revision fingerprints in a JF baseline.
+
+        Jellyfin's own track fingerprint and all playback/history values stay
+        unchanged. A subsequent normal bind/read still rejects changed JF
+        tracks. Older baselines require independently preserved revision proof;
+        a matching legacy fingerprint alone cannot prove unchanged media.
+        """
+        if not isinstance(stored, dict):
+            raise RuntimeError('Jellyfin-Baseline ist unvollstaendig')
+        state = json.loads(dump(stored))
+        if 'baseline' not in state:
+            return state
+        baseline = state['baseline']
+        if (not isinstance(baseline, dict) or set(baseline) != {'abs', 'bo', 'jf'}
+                or any(not isinstance(value, dict) for value in baseline.values())):
+            raise RuntimeError('Jellyfin-Baseline ist unvollstaendig')
+        old = baseline['abs'].get('fingerprint')
+        if (not isinstance(old, str) or len(old) != 64 or any(c not in '0123456789abcdef' for c in old)
+                or baseline['bo'].get('fingerprint') != old):
+            raise RuntimeError('Jellyfin-Baseline gehoert zu verschiedenen Dateizuordnungen')
+        if old == updated['fingerprint']:
+            return state
+        if stored.get('pending'):
+            raise RuntimeError('Offene Jellyfin-Uebernahme verhindert Manifestwechsel')
+        identity = mapping_identity_fingerprint(updated)
+        if previous is not None and old == previous['fingerprint']:
+            if (mapping_fingerprint(previous) != old
+                    or mapping_identity_fingerprint(previous) != identity):
+                raise RuntimeError('Jellyfin-Baseline hat andere Dateievidenz')
+        else:
+            history = self.db.execute(
+                '''SELECT h.revision,e.identity_hash FROM mapping_revision_history AS h
+                   LEFT JOIN mapping_revision_evidence AS e ON h.id=e.id AND h.revision=e.revision
+                   WHERE h.id=? AND h.fingerprint=?''', (updated['abs_id'], old)).fetchall()
+            if (len(history) != 1 or history[0][1] != identity
+                    or mapping_fingerprint(dict(updated, bo_revision=history[0][0])) != old):
+                raise RuntimeError('Jellyfin-Baseline hat keine bestaetigte historische Dateievidenz')
+        for side in ('abs', 'bo'):
+            baseline[side]['fingerprint'] = updated['fingerprint']
+        state.pop('candidate', None)
+        return state
+
+    def _jellyfin_revision_snapshot(self, updated, previous=None):
+        key = '_jellyfin_audio:' + updated['abs_id']
+        row = self.db.execute('SELECT value FROM state WHERE id=?', (key,)).fetchone()
+        raw = row[0] if row else None
+        stored = json.loads(raw) if raw is not None else {}
+        return raw, self._jellyfin_revision_state(stored, updated, previous)
+
+    def _revision_idle(self, id):
+        key = '_jellyfin_audio:' + id
+        if (self.db.execute("SELECT 1 FROM operations WHERE book IN (?,?) AND status='pending' LIMIT 1",
+                            (id, key)).fetchone()
+                or self.load(key).get('pending')):
+            raise RuntimeError('Offene Uebernahme verhindert Manifestwechsel')
+
+    def _save_jellyfin_revision(self, mapping, before, updated):
+        if before is None or json.loads(before) == updated:
+            return
+        self.db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',
+                        ('_jellyfin_audio:' + mapping['abs_id'], dump(updated)))
+        detail = dict(title=mapping['title'], old_fingerprint=json.loads(before)['baseline']['abs']['fingerprint'],
+                      new_fingerprint=mapping['fingerprint'], progress_unchanged=True)
+        self.db.execute('INSERT INTO events(at,book,kind,detail) VALUES (?,?,?,?)',
+                        (now(), mapping['abs_id'], 'jellyfin_revision_baseline_updated', dump(detail)))
+
+    def _refresh_jellyfin_revision(self, mapping, core, apply):
+        before, updated = self._jellyfin_revision_snapshot(mapping)
+        if before is None or json.loads(before) == updated:
+            return mapping
+        self._revision_idle(mapping['abs_id'])
+        if not apply:
+            return dict(mapping, _jellyfin_revision_preview=updated)
+        self.guard()
+        self.require_active_mapping(mapping['abs_id'])
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            self._revision_idle(mapping['abs_id'])
+            current = next((m for m in self.list_mappings() if m['abs_id'] == mapping['abs_id']), None)
+            row = self.db.execute('SELECT value FROM state WHERE id=?',
+                                  ('_jellyfin_audio:' + mapping['abs_id'],)).fetchone()
+            if (current is None or current['fingerprint'] != mapping['fingerprint']
+                    or self.load(mapping['abs_id']) != core or row != (before,)
+                    or self._jellyfin_revision_state(json.loads(before), mapping) != updated):
+                raise RuntimeError('Jellyfin-Baseline wurde waehrend der Manifestuebernahme geaendert')
+            self._save_jellyfin_revision(mapping, before, updated)
+        return mapping
+
+    def _commit_revision(self, previous, updated, before_state, after_state, before_jellyfin):
         id = previous['abs_id']
         self.require_active_mapping(id)
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
-            if self.db.execute("SELECT 1 FROM operations WHERE book=? AND status='pending'", (id,)).fetchone():
-                raise RuntimeError('Offene Uebernahme verhindert Manifestwechsel')
+            self._revision_idle(id)
             current = next((m for m in self.list_mappings() if m['abs_id'] == id), None)
             if current is None or current['fingerprint'] != previous['fingerprint'] or self.load(id) != before_state:
                 raise RuntimeError('Lokaler Sync-Zustand wurde waehrend der Manifestuebernahme geaendert')
+            row = self.db.execute('SELECT value FROM state WHERE id=?', ('_jellyfin_audio:' + id,)).fetchone()
+            if (row[0] if row else None) != before_jellyfin:
+                raise RuntimeError('Jellyfin-Baseline wurde waehrend der Manifestuebernahme geaendert')
+            jf_state = self._jellyfin_revision_state(json.loads(before_jellyfin) if before_jellyfin is not None else {},
+                                                     updated, previous)
             seed = next(m for m in self._seed_mappings() if m['abs_id'] == id)
             self.db.execute('INSERT OR REPLACE INTO mapping_revision_overrides VALUES (?,?,?,?)',
                             (id, updated['bo_id'], seed['fingerprint'], dump(updated)))
@@ -594,6 +687,7 @@ class Bridge:
                 self.db.execute('INSERT OR IGNORE INTO mapping_revision_evidence VALUES (?,?,?)',
                                 (id, mapping['bo_revision'], identity_hash))
             self.db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', (id, dump(after_state)))
+            self._save_jellyfin_revision(updated, before_jellyfin, jf_state)
             detail = {'title': updated['title'], 'old_revision': previous['bo_revision'],
                       'new_revision': updated['bo_revision'], 'old_fingerprint': previous['fingerprint'],
                       'new_fingerprint': updated['fingerprint'], 'progress_unchanged': True}
@@ -601,25 +695,30 @@ class Bridge:
                             (now(), id, 'manifest_revision_updated', dump(detail)))
 
     def prepare_pair(self, expected, stored, apply):
+        # Preview evidence is local to this call, never persisted or trusted
+        # from a configuration/previous mapping supplied to the apply path.
+        expected = {key: value for key, value in expected.items() if key != '_jellyfin_revision_preview'}
         current, detail = self._read_mapping(expected)
         if current['fingerprint'] == expected['fingerprint']:
             if 'bo_assets' in expected or 'bo_chapters' in expected:
                 reconcile_manifest_revision(expected, current)
             pair, raw = self._read_progress(expected, detail)
+            expected = self._refresh_jellyfin_revision(expected, stored, apply)
             return expected, stored, pair, raw, False
         report = reconcile_manifest_revision(expected, current)
-        if self.db.execute("SELECT 1 FROM operations WHERE book=? AND status='pending'",
-                           (expected['abs_id'],)).fetchone():
-            raise RuntimeError('Offene Uebernahme verhindert Manifestwechsel')
+        self._revision_idle(expected['abs_id'])
         updated = report['mapping']
         state = self._revision_state(stored, expected, updated)
+        before_jellyfin, jf_state = self._jellyfin_revision_snapshot(updated, expected)
         # Validate the actual playback row before recording the revision change.
         # Its old manifest can be the immediately previous or an already known
         # revision. There is no synthetic playback write just to refresh it.
         pair, raw = self._read_progress(updated, detail, {expected['bo_revision']}, history_mapping=expected)
         if apply:
             self.guard()
-            self._commit_revision(expected, updated, stored, state)
+            self._commit_revision(expected, updated, stored, state, before_jellyfin)
+        elif before_jellyfin is not None and json.loads(before_jellyfin) != jf_state:
+            updated = dict(updated, _jellyfin_revision_preview=jf_state)
         return updated, state, pair, raw, True
 
     def write_record(self, oid, id, record, status='pending'):

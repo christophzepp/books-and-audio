@@ -144,7 +144,7 @@ class AudioCoordinator:
         tracks = bind(mapping, self.inventory, b.config)
         if tracks is None:
             return None # Keep ABS/BookOrbit working for books Jellyfin cannot index.
-        stored = b.load(key)
+        stored = mapping.get('_jellyfin_revision_preview', b.load(key)) if not apply else b.load(key)
         rows = self.read(tracks)
         state = normalize(rows, tracks, stored.get('raw'))
         states = dict(pair, jf=state)

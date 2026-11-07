@@ -7,12 +7,15 @@ ABS/BookOrbit and all native EPUB pins without querying BookBridge at all.
 Native-mode configuration checks
 return SQL-derived booleans only; credential values never leave the database.
 """
+from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import json
 import math
 import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 from pathlib import PurePosixPath
 
@@ -27,6 +30,7 @@ WRITER_CHECK_FIELDS = frozenset({'global_abs_disabled', 'global_bookorbit_disabl
                                'global_bookorbit_kosync_absent', 'personal_bookorbit_kosync_absent'})
 SYNC_MODES = frozenset({'audiobook', 'audiobook_only', 'ebook_only'})
 IMAGE_PATTERN = re.compile(r'sha256:[0-9a-f]{64}')
+RECEIPT_MAX_AGE = 150
 
 
 class DeploymentError(RuntimeError):
@@ -520,7 +524,7 @@ def validate_podcast_aliases(config, gate, now=None):
     if (not isinstance(gate, dict) or gate.get('podcasts_ok') is not True
             or type(checked) not in (int, float) or not math.isfinite(checked)
             or type(current) not in (int, float) or not math.isfinite(current)
-            or not 0 <= current - checked <= 150):
+            or not 0 <= current - checked <= RECEIPT_MAX_AGE):
         raise DeploymentError('Fresh podcast deployment verification is unavailable')
     receipts, spec = gate.get('podcast_mounts'), config.get('podcasts')
     if not isinstance(receipts, dict) or set(receipts) != PODCAST_ENDPOINTS or not isinstance(spec, dict):
@@ -717,7 +721,7 @@ def validate_folder_aliases(config, gate, now=None):
     if (not isinstance(gate, dict) or gate.get('folder_gate_ok') is not True
             or type(checked) not in (int, float) or not math.isfinite(checked)
             or type(now) not in (int, float) or not math.isfinite(now)
-            or not 0 <= now - checked <= 150 or not isinstance(gate.get('folder_mounts'), dict)):
+            or not 0 <= now - checked <= RECEIPT_MAX_AGE or not isinstance(gate.get('folder_mounts'), dict)):
         raise DeploymentError('Fresh folder mount verification is unavailable')
     from folder_manager import active_folders, validate_service_paths
     provider = config.get('mapping_provider', 'bookorbit')
@@ -777,58 +781,95 @@ def validate_folder_aliases(config, gate, now=None):
     return True
 
 
-def main(root=None, runner=subprocess.run, clock=time.time):
-    root = Path(root) if root is not None else Path(__file__).resolve().parent.parent
+def _safe_check(check, config, runner):
+    try:
+        return True, check(config, runner)
+    except Exception as exc:
+        # Never expose process output, arguments, credentials or config values.
+        return False, str(exc) if isinstance(exc, DeploymentError) else type(exc).__name__
+
+
+def _collect_gate(root, runner, clock):
     gate = {'checked_at': clock(), 'ok': False, 'bookbridge_ok': False, 'podcasts_ok': False,
             'podcasts_reason': 'Podcast deployment is not configured',
             'pinepods_ok': False, 'pinepods_reason': 'PinePods image is not pinned',
             'bookbridge_reason': 'BookBridge deployment is not configured',
             'folder_gate_ok': False, 'folder_reason': 'Folder deployment is not configured'}
-    config = None
     try:
         config = json.loads((root / 'config/config.json').read_text())
-        check_deployment(config, runner)
-        gate['ok'] = True
     except Exception as exc:
-        # Never expose stderr/stdout, process arguments, response values, or
-        # config content. Only our fixed diagnostics are user-visible.
         gate['reason'] = str(exc) if isinstance(exc, DeploymentError) else type(exc).__name__
+        return gate
     # Independent result: an absent or failed BookOrbit must not invalidate
     # an explicitly reviewed ABS/BookBridge/Jellyfin deployment.
+    checks = [('ok', 'reason', check_deployment)]
     if isinstance(config, dict) and 'bookbridge_deployment' in config:
-        try:
-            check_bookbridge_deployment(config, runner)
-            gate['bookbridge_ok'] = True
-            gate.pop('bookbridge_reason', None)
-        except Exception as exc:
-            gate['bookbridge_reason'] = str(exc) if isinstance(exc, DeploymentError) else type(exc).__name__
+        checks.append(('bookbridge_ok', 'bookbridge_reason', check_bookbridge_deployment))
     if isinstance(config, dict) and 'podcast_deployment' in config:
-        try:
-            gate['podcast_mounts'] = check_podcast_deployment(config, runner)
-            gate['podcasts_ok'] = True
-            gate.pop('podcasts_reason', None)
-        except Exception as exc:
-            gate['podcasts_reason'] = str(exc) if isinstance(exc, DeploymentError) else type(exc).__name__
+        checks.append(('podcasts_ok', 'podcasts_reason', check_podcast_deployment))
     if isinstance(config, dict) and isinstance(config.get('podcast_deployment'), dict) and 'pinepods' in config['podcast_deployment']:
-        try:
-            gate['pinepods_ok'] = check_pinepods_deployment(config, runner)
-            gate.pop('pinepods_reason', None)
-        except Exception as exc:
-            gate['pinepods_reason'] = str(exc) if isinstance(exc, DeploymentError) else type(exc).__name__
+        checks.append(('pinepods_ok', 'pinepods_reason', check_pinepods_deployment))
     if isinstance(config, dict) and 'folder_deployment' in config:
+        checks.append(('folder_gate_ok', 'folder_reason', check_folder_deployment))
+    # Each group keeps its own ordered checks and 20s subprocess deadlines.
+    # Running independent groups together avoids adding all their timeouts to
+    # the age of one shared receipt. No worker mutates the gate or config.
+    with ThreadPoolExecutor(max_workers=len(checks)) as pool:
+        pending = [(flag, reason, pool.submit(_safe_check, check, config, runner))
+                   for flag, reason, check in checks]
+        for flag, reason, future in pending:
+            passed, result = future.result()
+            if not passed:
+                gate[reason] = result
+                continue
+            gate[flag] = result if flag == 'pinepods_ok' else True
+            gate.pop(reason, None)
+            if flag == 'podcasts_ok':
+                gate['podcast_mounts'] = result
+            elif flag == 'folder_gate_ok':
+                gate['folder_mounts'], gate['folder_errors'] = result
+    finished = clock()
+    checked = gate['checked_at']
+    if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) for value in (checked, finished))
+            or not 0 <= finished - checked <= RECEIPT_MAX_AGE):
+        # Keep the earliest observation time. Stamping completion as fresh
+        # would disguise old image/mount evidence after a slow Docker daemon.
+        for flag, reason, _ in checks:
+            gate[flag] = False
+            gate[reason] = 'Deployment verification expired before publication'
+        for field in ('podcast_mounts', 'folder_mounts', 'folder_errors'):
+            gate.pop(field, None)
+    return gate
+
+
+def _publish_gate(dest, gate):
+    descriptor, name = tempfile.mkstemp(prefix='.deployment-', suffix='.tmp', dir=dest.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, 'w') as output:
+            os.fchmod(output.fileno(), 0o600)
+            json.dump(gate, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, dest)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def main(root=None, runner=subprocess.run, clock=time.time):
+    root = Path(root) if root is not None else Path(__file__).resolve().parent.parent
+    # Hold one persistent lock inode through inspection and publication. An
+    # overlapping cron invocation must not publish an older snapshot last.
+    with os.fdopen(os.open(root / 'state/.deployment.lock', os.O_WRONLY | os.O_CREAT, 0o600), 'w') as lock:
+        os.fchmod(lock.fileno(), 0o600)
         try:
-            gate['folder_mounts'], gate['folder_errors'] = check_folder_deployment(config, runner)
-            gate['folder_gate_ok'] = True
-            gate.pop('folder_reason', None)
-        except Exception as exc:
-            gate['folder_reason'] = str(exc) if isinstance(exc, DeploymentError) else type(exc).__name__
-    dest = root / 'state/deployment.json'
-    temporary = dest.with_suffix('.tmp')
-    with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as output:
-        os.fchmod(output.fileno(), 0o600)
-        json.dump(gate, output)
-    os.replace(temporary, dest)
-    return 0 if gate['ok'] else 1
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 1
+        gate = _collect_gate(root, runner, clock)
+        _publish_gate(root / 'state/deployment.json', gate)
+        return 0 if gate['ok'] else 1
 
 
 if __name__ == '__main__':
