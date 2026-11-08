@@ -164,7 +164,9 @@ class PodcastFolderManagerTests(unittest.TestCase):
         self.config=dict(podcasts=dict(enabled=True,abs_root='/podcasts',worker_root=str(self.pod),jellyfin_root='/podcasts'),
             folder_access_roots=[dict(worker=str(self.pod),server='/srv/example-media/podcasts')],
             folder_mappings=[dict(id='podcasts-default',kind='podcasts',name='Podcasts',active=True,paths=dict(worker=str(self.pod),abs='/podcasts',jf='/podcasts'))])
-        self.manager=FolderManager(self.root,self.config,mount_checker=lambda _:True);self.manager.seed()
+        self.mount_generation='mount-1'
+        self.manager=FolderManager(self.root,self.config,mount_checker=lambda _:True,
+            generation_reader=lambda:self.mount_generation);self.manager.seed()
     def test_new_install_defaults_include_configured_podcasts_only(self):
         cfg=dict(self.config);cfg.pop('folder_mappings')
         rows=default_rows(cfg);self.assertEqual(rows[-1]['kind'],'podcasts');self.assertEqual(rows[-1]['paths']['jf'],'/podcasts')
@@ -179,6 +181,9 @@ class PodcastFolderManagerTests(unittest.TestCase):
         self.assertTrue(cfg['podcasts']['enabled']);self.assertNotIn('worker_root',cfg['podcasts'])
     def test_mount_loss_only_blocks_podcast_scope(self):
         self.manager.mount_checker=lambda _:False
+        # A real unmount also changes Linux mountinfo. Model that event on all
+        # test hosts instead of depending on whether /proc exists locally.
+        self.mount_generation='mount-2'
         cfg=self.manager.effective();self.assertEqual(cfg['podcasts']['folder_error'],'folder_mount_unavailable')
         self.assertNotIn('worker_root',cfg['podcasts']);self.assertIn('folder_mappings',cfg)
     def test_deactivation_requires_candidate_compatibility(self):
