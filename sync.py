@@ -140,6 +140,12 @@ class Bridge:
                 and credentials.get('bo_username') and credentials.get('bo_password')):
             self.bo = BOClient(config['bo_url'], credentials['bo_username'], credentials['bo_password'])
             self.bo.folder_config = config
+            self.bo.observation_root = self.root
+            self.bo.observation_metrics = self
+            self.bo.observation_binding = lambda: dict(
+                abs_url=self.config.get('abs_url'), bo_url=self.config.get('bo_url'),
+                bo_username=credentials.get('bo_username'),
+                generation=getattr(self,'media_observation_generation',lambda kind:None)('audiobooks'))
         if ((self.provider == 'bookbridge' or config.get('bookbridge', {}).get('enabled'))
                 and all(config.get('bookbridge', {}).get(k) for k in ('url', 'username', 'version'))
                 and credentials.get('bookbridge_password')):
@@ -413,7 +419,16 @@ class Bridge:
         self._new_native_pairs = set(result.get('native_readalongs', {})) if result['scan_ok'] else set()
         return mappings, summary
 
-    def _read_mapping(self, expected):
+    def observation(self, *attributes):
+        from contextlib import nullcontext
+        batch=getattr(self,'_book_observations',None)
+        return batch.scope(*[(self,name) for name in attributes]) if batch is not None else nullcontext()
+
+    def _read_mapping(self, expected, *, observe=False):
+        with self.observation('abs','bo') if observe else self.observation():
+            return self._read_mapping_current(expected)
+
+    def _read_mapping_current(self, expected):
         self.require_active_mapping(expected['abs_id'])
         pin = self.native_readalong().get(expected['abs_id'])
         ai = self.abs.item(expected['abs_id'])
@@ -443,8 +458,9 @@ class Bridge:
             return
         self.require_active_mapping(id)
         try:
-            ai = self.abs.item(id)
-            bd = self.bo.detail(expected['bo_id'])
+            with self.observation('abs','bo'):
+                ai = self.abs.item(id)
+                bd = self.bo.detail(expected['bo_id'])
             if not self._has_native_candidate(bd):
                 if apply:
                     with self.db:
@@ -700,11 +716,12 @@ class Bridge:
         # Preview evidence is local to this call, never persisted or trusted
         # from a configuration/previous mapping supplied to the apply path.
         expected = {key: value for key, value in expected.items() if key != '_jellyfin_revision_preview'}
-        current, detail = self._read_mapping(expected)
+        current, detail = self._read_mapping(expected, observe=True)
         if current['fingerprint'] == expected['fingerprint']:
             if 'bo_assets' in expected or 'bo_chapters' in expected:
                 reconcile_manifest_revision(expected, current)
-            pair, raw = self._read_progress(expected, detail)
+            with self.observation('abs','bo'):
+                pair, raw = self._read_progress(expected, detail)
             expected = self._refresh_jellyfin_revision(expected, stored, apply)
             return expected, stored, pair, raw, False
         report = reconcile_manifest_revision(expected, current)
@@ -723,15 +740,33 @@ class Bridge:
             updated = dict(updated, _jellyfin_revision_preview=jf_state)
         return updated, state, pair, raw, True
 
+    def verify_transfer_media(self, mapping):
+        """Fresh folder and native original-file checks only for actual work."""
+        guard=getattr(self,'media_guard',None)
+        if callable(guard):guard('audiobooks')
+        if self.bo is None:return
+        row=self.db.execute('SELECT bo_id,proof FROM native_readalong_enrollments WHERE id=?',
+                            (mapping['abs_id'],)).fetchone()
+        if not row or row[0]!=mapping['bo_id']:return
+        trusted=json.loads(row[1])
+        if not native_discovery._strong(trusted):return
+        proof,current=native_discovery.collect(self.bo,mapping,self.abs.item(mapping['abs_id']),
+            self.bo.detail(mapping['bo_id']),self.bo.manifest(mapping['bo_id']),trusted=trusted,cache_ok=False)
+        if proof!=trusted or current['fingerprint']!=mapping['fingerprint']:
+            raise ValueError('Native source changed before progress transfer')
+
     def write_record(self, oid, id, record, status='pending'):
         self.db.execute('INSERT OR REPLACE INTO operations VALUES (?,?,?,?)', (oid,id,dump(record),status))
         self.db.commit()
 
     def apply(self, mapping, pair, raw, direction, baseline):
         id = mapping['abs_id']; source,target = ('abs','bo') if direction=='abs_to_bo' else ('bo','abs')
+        batch=getattr(self,'_book_observations',None)
+        if batch is not None:batch.invalidate()
         self.require_active_mapping(id)
         self.native_readalong()
         native_discovery.settings(self.config)
+        self.verify_transfer_media(mapping)
         goal = pair[source]
         if goal['status']=='not_started':
             raise RuntimeError('Zuruecksetzen auf ungelesen wird nicht automatisch ausgefuehrt')
@@ -821,12 +856,15 @@ class Bridge:
         final,after=self.read_pair(mapping)
         if not equal(final['abs'],goal) or not equal(final['bo'],goal):
             raise RuntimeError('Uebernahme nach Schreiben nicht bestaetigt')
+        self.verify_transfer_media(mapping)
         record.update(stage='complete',after=after)
         self.write_record(oid,id,record,'complete')
         self.event(id,'synced',{'title':mapping['title'],'direction':direction,'seconds':round(goal['position'],3),'status':goal['status']})
         return final
 
     def cycle(self, apply=False, settle=30):
+        from observation_snapshot import ObservationBatch
+        self._book_observations=ObservationBatch(self)
         if getattr(self, 'provider', 'bookorbit') == 'bookbridge':
             from provider_runtime import BookBridgeCoordinator
             return BookBridgeCoordinator(self).cycle(apply, settle)
@@ -867,11 +905,13 @@ class Bridge:
                 pending=self.db.execute("SELECT id,value FROM operations WHERE book=? AND status='pending'",(id,)).fetchall()
                 if pending:
                     # Never replay an uncertain write. Only accept a fully reached goal.
+                    pair,raw=self.read_pair(mapping)
                     if len(pending)!=1:
                         raise RuntimeError('Mehrere ungeklaerte Schreibvorgaenge')
                     oid,rec=pending[0];rec=json.loads(rec)
                     if equal(pair['abs'],rec['goal']) and equal(pair['bo'],rec['goal']):
                         if apply:
+                            self.verify_transfer_media(mapping)
                             rec.update(stage='reconciled',after=raw);self.write_record(oid,id,rec,'complete')
                             stored={'baseline':pair};self.save(id,stored)
                     else:

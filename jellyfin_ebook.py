@@ -1,5 +1,6 @@
 """Same-file EPUB reading progress, with a durable journal and readback checks."""
 import copy
+from contextlib import nullcontext
 import hashlib
 import math
 from pathlib import Path
@@ -51,15 +52,22 @@ class EbookCoordinator:
         if type(u.get('Played')) is not bool:raise ValueError('Invalid Jellyfin completion flag')
         raw=dict(progress=p,status=rs,jf={k:u.get(k) for k in ('PlaybackPositionTicks','Played','PlayCount','LastPlayedDate')})
         generation=None
-        if getattr(self.b,'media_generation',None):
-            try:generation=self.b.media_generation('ebooks')
+        generation_reader=getattr(self.b,'media_observation_generation',getattr(self.b,'media_generation',None))
+        if generation_reader:
+            try:
+                generation=generation_reader('ebooks')
+                if not isinstance(generation,str) or not generation:return raw,None
             except (OSError,ValueError):
                 # Missing generation evidence cannot grant the idle shortcut;
                 # the ordinary media guard must validate the current mount.
                 return raw,None
-        binding=hashlib.sha256(encode(dict(mapping=m,book={k:d.get(k) for k in ('id','libraryId')},
+        cfg=getattr(self.b,'config',{})
+        source={k:m.get(k) for k in ('bo_id','bo_library_id','file_id','bo_path','jf_path','jf_id','sha256','size','local_path')}
+        binding=hashlib.sha256(encode(dict(schema=2,mapping=source,book={k:d.get(k) for k in ('id','libraryId')},
             file=files[0],item={k:item.get(k) for k in ('Id','Path','Type')},
-            folders=getattr(self.b,'config',{}).get('folder_mappings'),generation=generation)).encode()).hexdigest()
+            folders=[{k:r.get(k) for k in ('id','kind','active','paths')} for r in cfg.get('folder_mappings',[]) if r.get('kind')=='ebooks' and r.get('active',True)],
+            account=dict(bo_url=cfg.get('bo_url'),jellyfin={k:cfg.get('jellyfin',{}).get(k) for k in ('url','user_id','username','version')}),
+            generation=generation)).encode()).hexdigest()
         return raw,binding
 
     def read(self,m,e,raw=None):
@@ -94,7 +102,11 @@ class EbookCoordinator:
     def handle(self,m,apply,settle):
         b=self.b;key='_jellyfin_ebook:'+str(m['file_id'])
         config = getattr(b, 'config', {})
-        self.jf.guard();raw,binding=self.read_raw(m);stored=b.load(key)
+        self.jf.guard()
+        batch=getattr(b,'_book_observations',None)
+        with batch.scope((b,'bo'),(self,'jf')) if batch is not None else nullcontext():
+            raw,binding=self.read_raw(m)
+        stored=b.load(key)
         checkpoint=stored.get('checkpoint') or {}
         verified_at=checkpoint.get('verified_at')
         current_time=b.clock()
@@ -137,6 +149,8 @@ class EbookCoordinator:
         if candidate.get('signature')!=signature:
             candidate=dict(signature=signature,since=b.clock());stored['candidate']=candidate;b.save(key,stored)
         if b.clock()-candidate['since']<settle or m['jf_id'] in self.jf.active_ids():return 'waiting'
+        batch=getattr(b,'_book_observations',None)
+        if batch is not None:batch.invalidate()
         goal=pair[source];index=round(goal['position']/10);point,pct=e.index_to_bo(index)
         if goal['status']=='finished':pct=100
         if source=='jf' and goal['status']!='finished':

@@ -263,13 +263,21 @@ class PinepodsClient:
                 or 'external_url' not in status or status['external_url'] is not None):
             raise RequestError('PinePods: native background import must be disabled while the internal gpodder server stays enabled')
 
+    def _episode_actions(self, feed_url, enclosure_url):
+        """Exact-episode actions; ordinary reads always fetch the current feed."""
+        return self.actions(feed_url)['actions']
+
+    def observation_snapshot(self):
+        from observation_snapshot import PineObservation
+        return PineObservation(self)
+
     def _read_gpodder(self, feed_url, enclosure_url, duration, guid=None, *, verified_native=None):
         _url(feed_url)
         _url(enclosure_url)
         duration = _number(duration, minimum=0.001)
         if guid is not None:
             _text(guid)
-        actions = self.actions(feed_url)['actions']
+        actions = self._episode_actions(feed_url, enclosure_url)
         candidates = []
         for row in actions:
             if row['podcast'] != feed_url or row['episode'] != enclosure_url:
@@ -345,6 +353,71 @@ class PinepodsClient:
         self._native_user_id = user_id
         return user_id
 
+    def _native_catalog(self, feed_url, user_id):
+        """Complete validated personal feed index; observation snapshots may reuse it."""
+        pods = self._request('GET', '/api/data/return_pods/' + str(user_id), native=True)
+        try:
+            rows = pods['pods']
+            if not isinstance(rows, list) or len(rows) > 10000 or any(not isinstance(p, dict) for p in rows):
+                raise ValueError()
+            ids = set()
+            for pod in rows:
+                ident = pod.get('podcastid')
+                if type(ident) is not int or ident <= 0 or ident in ids:
+                    raise ValueError()
+                ids.add(ident)
+                _url(pod.get('feedurl'))
+            matches = [p for p in rows if p.get('feedurl') == feed_url]
+        except (KeyError, TypeError, ValueError):
+            raise RequestError('PinePods: native feed inventory is invalid') from None
+        if not matches:
+            raise EpisodeUnavailable('feed_missing')
+        if len(matches) > 1:
+            raise EpisodeUnavailable('feed_ambiguous')
+        podcast_id = matches[0]['podcastid']
+        offset, expected_total, by_url, seen = 0, None, {}, set()
+        empty_urls = 0
+        catalog_rows = []
+        while True:
+            data = self._request('GET', '/api/data/podcast_episodes', native=True,
+                                 params={'user_id': user_id, 'podcast_id': podcast_id, 'limit': 200,
+                                         # 0.9.0 limits each SQL union branch DESC
+                                         # before the outer sort/offset. ASC repeats
+                                         # earlier pages as that inner limit grows.
+                                         'offset': offset, 'sort_by': 'date', 'sort_order': 'desc', 'filter': 'all'})
+            try:
+                rows, total = data['episodes'], data['total']
+                if (not isinstance(rows, list) or type(total) is not int or total < 0 or total > 100000
+                        or expected_total is not None and total != expected_total or len(rows) > 200
+                        or offset + len(rows) > total):
+                    raise ValueError()
+                expected_total = total
+                for row in rows:
+                    episode_id = row.get('Episodeid')
+                    if type(episode_id) is not int or episode_id <= 0 or episode_id in seen:
+                        raise ValueError()
+                    episode_url = row.get('Episodeurl')
+                    if episode_url == '':
+                        # PinePods 0.9.0 may retain an unrelated historical
+                        # row with an empty enclosure. Never normalize it,
+                        # infer its identity or treat it as a target match.
+                        empty_urls += 1
+                    else:
+                        _url(episode_url)
+                    seen.add(episode_id)
+                    catalog_rows.append(row)
+                    by_url.setdefault(episode_url, []).append(episode_id)
+                offset += len(rows)
+                if offset == total:
+                    break
+                if not rows:
+                    raise ValueError()
+            except (KeyError, TypeError, ValueError, AttributeError):
+                raise RequestError('PinePods: episode inventory is incomplete or changed') from None
+        receiver = getattr(self, '_accept_catalog', None)
+        if callable(receiver):receiver(feed_url, user_id, matches[0], catalog_rows)
+        return podcast_id, by_url, empty_urls
+
     def _native_episode(self, feed_url, enclosure_url, duration, *, _inspection=False):
         _url(feed_url)
         _url(enclosure_url)
@@ -352,65 +425,8 @@ class PinepodsClient:
         key = (feed_url, enclosure_url)
         resolved_podcast_id = None
         if key not in self._native_ids:
-            pods = self._request('GET', '/api/data/return_pods/' + str(user_id), native=True)
-            try:
-                rows = pods['pods']
-                if not isinstance(rows, list) or len(rows) > 10000 or any(not isinstance(p, dict) for p in rows):
-                    raise ValueError()
-                ids = set()
-                for pod in rows:
-                    ident = pod.get('podcastid')
-                    if type(ident) is not int or ident <= 0 or ident in ids:
-                        raise ValueError()
-                    ids.add(ident)
-                    _url(pod.get('feedurl'))
-                matches = [p for p in rows if p.get('feedurl') == feed_url]
-            except (KeyError, TypeError, ValueError):
-                raise RequestError('PinePods: native feed inventory is invalid') from None
-            if not matches:
-                raise EpisodeUnavailable('feed_missing')
-            if len(matches) > 1:
-                raise EpisodeUnavailable('feed_ambiguous')
-            podcast_id = matches[0]['podcastid']
-            resolved_podcast_id = podcast_id
-            offset, expected_total, matches, seen = 0, None, [], set()
-            empty_urls = 0
-            while True:
-                data = self._request('GET', '/api/data/podcast_episodes', native=True,
-                                     params={'user_id': user_id, 'podcast_id': podcast_id, 'limit': 200,
-                                             # 0.9.0 limits each SQL union branch DESC
-                                             # before the outer sort/offset. ASC repeats
-                                             # earlier pages as that inner limit grows.
-                                             'offset': offset, 'sort_by': 'date', 'sort_order': 'desc', 'filter': 'all'})
-                try:
-                    rows, total = data['episodes'], data['total']
-                    if (not isinstance(rows, list) or type(total) is not int or total < 0 or total > 100000
-                            or expected_total is not None and total != expected_total or len(rows) > 200
-                            or offset + len(rows) > total):
-                        raise ValueError()
-                    expected_total = total
-                    for row in rows:
-                        episode_id = row.get('Episodeid')
-                        if type(episode_id) is not int or episode_id <= 0 or episode_id in seen:
-                            raise ValueError()
-                        episode_url = row.get('Episodeurl')
-                        if episode_url == '':
-                            # PinePods 0.9.0 may retain an unrelated historical
-                            # row with an empty enclosure. Never normalize it,
-                            # infer its identity or treat it as a target match.
-                            empty_urls += 1
-                        else:
-                            _url(episode_url)
-                        seen.add(episode_id)
-                        if episode_url == enclosure_url:
-                            matches.append(episode_id)
-                    offset += len(rows)
-                    if offset == total:
-                        break
-                    if not rows:
-                        raise ValueError()
-                except (KeyError, TypeError, ValueError, AttributeError):
-                    raise RequestError('PinePods: episode inventory is incomplete or changed') from None
+            resolved_podcast_id, by_url, empty_urls = self._native_catalog(feed_url, user_id)
+            matches = by_url.get(enclosure_url, [])
             if not matches:
                 if empty_urls:
                     # Complete IDs plus empty historical enclosures cannot prove
@@ -427,8 +443,14 @@ class PinepodsClient:
         data = self._request('POST', '/api/data/get_episode_metadata', native=True,
                              payload={'episode_id': episode_id, 'user_id': user_id,
                                       'person_episode': False, 'is_youtube': False})
+        row = data.get('episode') if isinstance(data, dict) else None
+        return self._native_from_row(row, feed_url, enclosure_url, duration, episode_id, user_id,
+                                     resolved_podcast_id, _inspection=_inspection)
+
+    def _native_from_row(self, row, feed_url, enclosure_url, duration, episode_id, user_id,
+                         resolved_podcast_id, *, _inspection=False):
+        """Apply identical schema/identity guards to individual and bulk observations."""
         try:
-            row = data['episode']
             if (not isinstance(row, dict) or type(row.get('episodeid')) is not int or row['episodeid'] <= 0
                     or type(row.get('is_youtube')) is not bool or type(row.get('completed')) is not bool):
                 raise ValueError()
@@ -544,7 +566,7 @@ class PinepodsClient:
         own position/total describe a status, not a position on another cut.
         The ordinary position reader above deliberately remains unchanged.
         """
-        rows = [row for row in self.actions(feed_url)['actions']
+        rows = [row for row in self._episode_actions(feed_url, enclosure_url)
                 if row['podcast'] == feed_url and row['episode'] == enclosure_url
                 and row['action'] in ('play', 'new')]
         if not rows:

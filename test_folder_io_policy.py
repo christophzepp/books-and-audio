@@ -44,6 +44,7 @@ class FolderSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot(self.manager)['folder_checks'], 2)
 
     def test_integrity_interval_checks_active_rows_once_not_inactive_rows(self):
+        self.manager.base_config['io_policy'] = {'folder_validation_interval_seconds': 900}
         self.now += 899
         with patch.object(self.manager, 'check', wraps=self.manager.check) as check:
             self.manager.effective(); self.assertEqual(check.call_count, 0)
@@ -146,7 +147,7 @@ class FolderSnapshotTests(unittest.TestCase):
             self.assertEqual(check.call_count, 0)
             with self.assertRaisesRegex(FolderManagerError, 'folder_unavailable'):
                 self.manager.effective()
-            self.assertEqual(check.call_count, 2)
+            self.assertEqual(check.call_count, 1)
 
     def test_deployment_identity_change_invalidates_without_extending_receipt_ttl(self):
         self.manager.refresh(context={'ok': True, 'folder_mounts': {'worker': 'first'}})
@@ -155,7 +156,9 @@ class FolderSnapshotTests(unittest.TestCase):
             self.manager.refresh(context={'ok': True, 'folder_mounts': {'worker': 'first'}})
             self.assertEqual(check.call_count, 0)
             self.manager.refresh(context={'ok': False, 'folder_mounts': {}})
-            self.assertEqual(check.call_count, 2)
+            # Local worker mounts did not change; separate fresh deployment
+            # guards handle the remote service outage without waking media.
+            self.assertEqual(check.call_count, 0)
         self.assertNotEqual(before, self.manager.generation('ebooks'))
 
 

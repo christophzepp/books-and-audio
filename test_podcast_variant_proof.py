@@ -312,10 +312,11 @@ class VariantProofTests(unittest.TestCase):
         self.assertEqual(self.b.db.execute('SELECT COUNT(*) FROM operations').fetchone()[0],0)
         self.assertFalse(self.b.pinepods.posts)
 
-    def test_expired_cache_requires_fresh_measurement_and_can_renew_only_unchanged_identity(self):
+    def test_old_observation_stays_historical_and_actual_refresh_renews_only_unchanged_identity(self):
         original=self.inspect(refresh=True,apply=True);self.assertTrue(original['ready'])
         self.b.time+=31*86400;self.helper=VariantProof(self.b,self.probe);self.probe.reset_mock()
-        self.assertEqual(self.inspect()['reason'],'variant_cached_evidence_expired');self.probe.assert_not_called()
+        historical=self.inspect();self.assertTrue(historical['ready']);self.assertFalse(historical['fresh'])
+        self.assertEqual(historical['validated_at'],original['validated_at']);self.probe.assert_not_called()
         self.probe.return_value=proof(at=self.b.time)
         renewed=self.inspect(refresh=True,apply=True)
         self.assertTrue(renewed['fresh']);self.assertEqual(renewed['validated_at'],self.b.time)

@@ -138,21 +138,30 @@ class AudioCoordinator:
 
     def handle(self, mapping, pair, raw, apply, settle):
         b, id = self.b, mapping['abs_id']; key = '_jellyfin_audio:' + id
+        from contextlib import nullcontext
+        batch=getattr(b,'_book_observations',None)
         if self.inventory is None:
             self.jf.guard()
-            self.inventory = self.jf.items(parent=b.config['jellyfin']['audio_library_id'], types='AudioBook')
+            with batch.scope((self,'jf')) if batch is not None else nullcontext():
+                self.inventory = self.jf.items(parent=b.config['jellyfin']['audio_library_id'], types='AudioBook')
         tracks = bind(mapping, self.inventory, b.config)
         if tracks is None:
             return None # Keep ABS/BookOrbit working for books Jellyfin cannot index.
         stored = mapping.get('_jellyfin_revision_preview', b.load(key)) if not apply else b.load(key)
-        rows = self.read(tracks)
+        with batch.scope((self,'jf')) if batch is not None else nullcontext():
+            rows = self.read(tracks)
         state = normalize(rows, tracks, stored.get('raw'))
         states = dict(pair, jf=state)
         baseline = stored.get('baseline')
         pending = stored.get('pending')
         if pending:
+            pair,raw=b.read_pair(mapping)
+            rows=self.read(tracks)
+            states=dict(pair,jf=normalize(rows,tracks,stored.get('raw')))
             if all(same(s, pending['goal']) for s in states.values()):
-                if apply: b.save(key, dict(baseline=states,raw=rows)); b.save(id, {'baseline': pair})
+                if apply:
+                    if getattr(b,'verify_transfer_media',None):b.verify_transfer_media(mapping)
+                    b.save(key, dict(baseline=states,raw=rows)); b.save(id, {'baseline': pair})
                 return 'unchanged'
             raise RuntimeError('Interrupted Jellyfin transfer requires journal review')
         source = choose(states, baseline)
@@ -166,7 +175,9 @@ class AudioCoordinator:
             candidate = dict(signature=signature,since=b.clock()); stored['candidate']=candidate; b.save(key,stored)
         if b.clock()-candidate['since'] < settle: return 'waiting'
         if self.jf.active_ids() & {t['id'] for t in tracks}: return 'waiting'
+        if batch is not None:batch.invalidate()
         b.guard(); self.jf.guard()
+        if getattr(b,'verify_transfer_media',None):b.verify_transfer_media(mapping)
         _, fresh = b.read_pair(mapping)
         if encode(fresh) != encode(raw) or encode(self.read(tracks)) != encode(rows):
             raise RuntimeError('Progress changed before Jellyfin transfer')
@@ -229,6 +240,7 @@ class AudioCoordinator:
         finalpair, finalraw=b.read_pair(mapping); rows=self.read(tracks)
         final=dict(finalpair,jf=normalize(rows,tracks))
         if not all(same(s,goal) for s in final.values()): raise RuntimeError('Three-source transfer not confirmed')
+        if getattr(b,'verify_transfer_media',None):b.verify_transfer_media(mapping)
         record['stage']='complete'; record['after']=finalraw; record['jellyfin_after']=rows
         b.write_record(record['id'],key,record,'complete')
         b.save(key,dict(baseline=final,raw=rows)); b.save(id,{'baseline':finalpair})

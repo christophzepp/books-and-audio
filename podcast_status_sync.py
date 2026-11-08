@@ -302,7 +302,9 @@ class StatusCoordinator:
         self.mark(mapping,status='enrolled' if stored.get('enrolled') else 'joining')
         if stored.get('binding') and stored['binding'] != binding:
             raise StatusConflict('variant_identity_changed')
-        states,raw=self.read(mapping,proof)
+        if stored.get('enrolled') and not stored.get('pending') and getattr(self.c, 'observation', None) is not None:
+            with self.c.observing(self):states,raw=self.read(mapping,proof)
+        else:states,raw=self.read(mapping,proof)
         if stored.get('pending'):
             return self.resume(mapping,key,stored,states,raw,proof,apply)
         decision = stored.get('reviewed_source')
@@ -321,6 +323,9 @@ class StatusCoordinator:
                     states,raw=self.read_renewed(mapping,proof,fresh,raw)
                     proof=fresh
                 self.baseline(key,binding,states,raw,proof)
+                if not stored.get('enrolled'):
+                    invalidate=getattr(self.c,'invalidate_observations',None)
+                    if callable(invalidate):invalidate()
                 self.mark(mapping,status='enrolled')
             return 'unchanged',states
         if not apply:return 'proposed',states
@@ -489,14 +494,18 @@ class StatusCoordinator:
             if not 0<=self.b.clock()-proof.get('validated_at',-1)<=150:
                 self.mark(mapping,'variant_proof_stale');return 'waiting',states
             checkpoint('sending')
-            if step['service']=='abs':
-                if step['kind']=='position':self.c.abs.position(mapping,step['value'])
-                else:self.c.abs.finished(mapping,step['value'],int(self.b.clock()*1000) if step['value'] else None)
-            elif step['service']=='jf':self.c.jf.update(mapping['jf']['id'],step['value'])
-            else:
-                receipt=self.pine.write_status_action(step['value'],expected=raw['pinepods'])
-                if isinstance(receipt,dict) and receipt.get('timestamp')is not None:
-                    step['value']['_server_timestamp']=action_epoch(receipt['timestamp']);checkpoint('sending')
+            try:
+                if step['service']=='abs':
+                    if step['kind']=='position':self.c.abs.position(mapping,step['value'])
+                    else:self.c.abs.finished(mapping,step['value'],int(self.b.clock()*1000) if step['value'] else None)
+                elif step['service']=='jf':self.c.jf.update(mapping['jf']['id'],step['value'])
+                else:
+                    receipt=self.pine.write_status_action(step['value'],expected=raw['pinepods'])
+                    if isinstance(receipt,dict) and receipt.get('timestamp')is not None:
+                        step['value']['_server_timestamp']=action_epoch(receipt['timestamp']);checkpoint('sending')
+            finally:
+                invalidate=getattr(self.c,'invalidate_observations',None)
+                if callable(invalidate):invalidate()
             current,fresh_raw=self.read(mapping,proof)
             if not self.confirmed(step,fresh_raw,raw,proof):raise StatusConflict('variant_pending_review')
             states,raw=current,fresh_raw;advance();checkpoint('verified')

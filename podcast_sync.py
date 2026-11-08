@@ -7,6 +7,7 @@ API reference: ABS v2.37.1 MeController and MediaProgress; Jellyfin UserItems AP
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 from collections import Counter
 import datetime as dt
 import hashlib
@@ -199,6 +200,9 @@ class EpisodeABS:
         return '/api/me/progress/' + self.client._id(podcast) + '/' + self.client._id(episode)
 
     def read(self, mapping):
+        indexed = getattr(self.client, 'episode_progress', None)
+        if getattr(self.client, '_observation_only', False) is True and callable(indexed):
+            return indexed(mapping['podcast_id'], mapping['episode_id'])
         return self.client._request('GET', self._path(mapping['podcast_id'], mapping['episode_id']),
                                     '/api/me/progress/{podcast}/{episode}', missing_ok=True)
 
@@ -395,7 +399,52 @@ class PodcastCoordinator:
         self.variant_checker = None
         self.feed_resolver = None
 
+    def invalidate_observations(self):
+        batch = getattr(self, 'observation', None)
+        if batch is not None:batch.invalidate()
+        self.feed_resolver = None
+
+    def mutate(self, action, *args, **kwargs):
+        # A lost response may already have changed remote state. Clear the
+        # entire cycle snapshot on success AND failure before another mapping
+        # can observe it; ordinary unchanged episodes keep their shared view.
+        try:return action(*args, **kwargs)
+        finally:self.invalidate_observations()
+
+    def observing(self, *consumers):
+        """Only initial reads use the cycle snapshot; transactions stay fresh."""
+        batch = getattr(self, 'observation', None)
+        if batch is None:
+            return nullcontext()
+        bindings = [(self.b, 'abs'), (self.abs, 'client'), (self, 'jf'), (self, 'pine')]
+        for attr in ('pinepods', 'jellyfin'):
+            if hasattr(self.b, attr):bindings.append((self.b, attr))
+        for consumer in consumers:
+            if hasattr(consumer, 'pine'):bindings.append((consumer, 'pine'))
+        return batch.scope(*bindings)
+
+    def observe_read(self, mapping):
+        from podcast_status_sync import pending
+        stored = self.b.load(mapping['id'])
+        # Initial admission and interrupted operations retain the original live
+        # endpoint reads; an unchanged enrolled episode can use this cycle's view.
+        if (not stored.get('baseline') or stored.get('pending') or pending(self.b, mapping['id'])
+                or mapping.get('_pine_selected') and not mapping.get('_pine_enrolled')):
+            return self.read(mapping)
+        with self.observing():
+            return self.read(mapping)
+
     def variant_proof(self, mapping, *, refresh=False, apply=False, force_source=False):
+        batch = getattr(self, 'observation', None)
+        if refresh or force_source:
+            if batch is not None:batch.invalidate()
+            try:return self._variant_proof(mapping, refresh=refresh, apply=apply, force_source=force_source)
+            finally:
+                if batch is not None:batch.invalidate()
+        with self.observing():
+            return self._variant_proof(mapping, refresh=refresh, apply=apply, force_source=force_source)
+
+    def _variant_proof(self, mapping, *, refresh=False, apply=False, force_source=False):
         from podcast_review import PREFIX, reported_proof
         reviewed = self.b.load(PREFIX + mapping['id'])
         if reviewed.get('mode')=='personal_route':
@@ -424,7 +473,8 @@ class PodcastCoordinator:
         from podcast_variant_proof import VariantProof
         if self.variant_checker is None:
             self.variant_checker=VariantProof(self.b)
-        return self.variant_checker.candidate(mapping) is True
+        with self.observing():
+            return self.variant_checker.candidate(mapping) is True
 
     def select_variant(self,mapping,proof):
         mapping.update(_variant_selected=True,_pine_selected=False,_pine_mode='status_only',
@@ -441,7 +491,11 @@ class PodcastCoordinator:
         from pine_metadata_repair import PineMetadataRepair
         if self.metadata_repair is None:
             self.metadata_repair = PineMetadataRepair(self.b)
-        outcome = self.metadata_repair.repair_if_needed(mapping, apply)
+        batch=getattr(self, 'observation', None)
+        if batch is not None:batch.invalidate()
+        try:outcome = self.metadata_repair.repair_if_needed(mapping, apply)
+        finally:
+            if batch is not None:batch.invalidate()
         mapping['_pine_metadata_repair'] = outcome
         return outcome
 
@@ -473,9 +527,15 @@ class PodcastCoordinator:
         record=self.alias_record(mapping)
         if record is None:
             from pine_feed_route import ReviewedFeeds
-            if self.feed_resolver is None:
-                self.feed_resolver = ReviewedFeeds(self.b, self.pine)
-            feed = self.feed_resolver.resolve(mapping)
+            if getattr(self.pine, '_observation_only', False) is True:
+                if self.feed_resolver is None or self.feed_resolver.pine is not self.pine:
+                    self.feed_resolver = ReviewedFeeds(self.b, self.pine)
+                resolver = self.feed_resolver
+            else:
+                # A resolver captures its client and feed inventory. Never let
+                # an observational facade escape into a later live write guard.
+                resolver = ReviewedFeeds(self.b, self.pine)
+            feed = resolver.resolve(mapping)
             return {'feed_url':feed,'enclosure_url':mapping['enclosure_url'],
                     'duration':mapping['duration'],'alias_fingerprint':None}
         candidate=candidate_route(record,mapping,abs_guid=mapping.get('abs_guid'),account=self.pine.identity)
@@ -506,6 +566,8 @@ class PodcastCoordinator:
             raise ValueError('Selected ABS library is not an accessible podcast library')
         results, issues, seen, files, urls = [], [], set(), set(), Counter()
         inventory = self.jf.items(parent=self.cfg['jellyfin_library_id'], types='AudioBook')
+        inventory_by_path = {}
+        for row in inventory:inventory_by_path.setdefault(row.get('Path'), []).append(row)
         for entry in self.b.abs.inventory(self.cfg['abs_library_id']):
             item = self.b.abs.item(identifier(entry.get('id')))
             episodes = item.get('media', {}).get('episodes')
@@ -527,7 +589,7 @@ class PodcastCoordinator:
                         raise ValueError('PinePods requires unique podcast feed and episode URLs')
                 index_reason='Episode is not indexed in the selected Jellyfin library'
                 try:
-                    target = bind(mapping, inventory)
+                    target = bind(mapping, inventory_by_path.get(mapping['jf_path'], []))
                 except JellyfinProbePending:
                     # Never turn a known participant or uncertain operation
                     # into an absent newcomer. No history is read or rewritten.
@@ -602,14 +664,14 @@ class PodcastCoordinator:
         if not self.pine:
             if enrolled:
                 raise ValueError('Previously enrolled PinePods participant is disabled; its history cannot be dropped')
-            return self.read(mapping)
+            return self.observe_read(mapping)
         if mapping.get('_variant_selected') or mapping.get('_variant_disabled'):
             mapping['_pine_selected']=False
             mapping['_pine_mode']='status_only'
             if enrolled:
                 from podcast_status_sync import StatusConflict
                 raise StatusConflict('variant_full_enrollment_review')
-            return self.read(mapping)
+            return self.observe_read(mapping)
         optional = self.cfg.get('pinepods_optional_enrollment') is True
         pending = stored.get('pending')
         code = mapping.get('_pine_unavailable')
@@ -632,7 +694,7 @@ class PodcastCoordinator:
             if enrolled or not optional:
                 raise ValueError(PINE_REASONS[code])
             mapping.update(_pine_selected=False, _pine_status='waiting', _pine_reason_code=code)
-            return self.read(mapping)
+            return self.observe_read(mapping)
         # A verified historical variant remains status-only even if today's
         # RSS value happens to match the ABS file length. Neither a normal
         # full-position read nor metadata repair may erase that classification.
@@ -643,15 +705,15 @@ class PodcastCoordinator:
                 proof=self.variant_proof(mapping,refresh=True,apply=apply)
             if proof.get('ready'):
                 self.select_variant(mapping,proof)
-                return self.read(mapping)
+                return self.observe_read(mapping)
             if not optional:
                 from podcast_status_sync import StatusConflict
                 raise StatusConflict('variant_proof_required')
             mapping.update(_pine_selected=False,_pine_status='waiting',_pine_mode='status_only',
                            _pine_status_reason_code='variant_proof_required')
-            return self.read(mapping)
+            return self.observe_read(mapping)
         try:
-            return self.read(mapping)
+            return self.observe_read(mapping)
         except EpisodeUnavailable as exc:
             if self.alias_record(mapping) is not None:
                 raise ValueError('Reviewed PinePods alias normal media guard failed') from None
@@ -661,7 +723,7 @@ class PodcastCoordinator:
                     # All normal duration, receipt and conflict checks run
                     # again; a metadata repair is never a progress approval.
                     try:
-                        return self.read(mapping)
+                        return self.observe_read(mapping)
                     except EpisodeUnavailable as retried:
                         exc = retried
             # A typed media mismatch/unresolved identity after a complete ID
@@ -678,12 +740,12 @@ class PodcastCoordinator:
                     proof=self.variant_proof(mapping,refresh=True,apply=apply)
                 if proof.get('ready'):
                     self.select_variant(mapping,proof)
-                    return self.read(mapping)
+                    return self.observe_read(mapping)
                 mapping['_pine_status_reason_code']='variant_proof_required'
             if exc.reason not in PINE_REASONS:
                 raise
             mapping.update(_pine_selected=False, _pine_status='waiting', _pine_reason_code=exc.reason)
-            return self.read(mapping)
+            return self.observe_read(mapping)
 
     def save_baseline(self, key, identity, states, raw):
         enrolled = 'pinepods' in states or (key in self.history and not self.b.load('_pine_transition:'+key))
@@ -693,7 +755,10 @@ class PodcastCoordinator:
             self.history.add(key)
         if (raw.get('pinepods') or {}).get('alias_fingerprint'):
             value['pine_alias_fingerprint']=raw['pinepods']['alias_fingerprint']
+        previous = self.b.load(key)
         self.b.save(key, value)
+        if not previous.get('baseline') or enrolled and not previous.get('pine_enrolled'):
+            self.invalidate_observations()
 
     def handle(self, mapping, apply, settle):
         from podcast_status_sync import StatusCoordinator,StatusConflict,state_key,pending
@@ -738,7 +803,7 @@ class PodcastCoordinator:
                 public, snapshot = inspect(self, mapping, automatic=True)
             except ReviewError:
                 raise mismatch from None
-            states = commit(self, mapping, public, snapshot, 'abs', True)
+            states = self.mutate(commit, self, mapping, public, snapshot, 'abs', True)
             self.select_variant(mapping, snapshot[5])
             mapping.update(_pine_status='enrolled', _pine_enrolled=False)
             mapping.pop('_pine_status_reason_code', None)
@@ -838,7 +903,7 @@ class PodcastCoordinator:
 
         def abs_step(label, action, expected_position, statuses):
             nonlocal states, raw
-            unchanged(); checkpoint('sending_abs_' + label); action()
+            unchanged(); checkpoint('sending_abs_' + label); self.mutate(action)
             current, fresh = self.read(mapping)
             if any(not raw_equal({k: fresh[k]}, {k: raw[k]}) for k in raw if k != 'abs'):
                 raise RuntimeError('Another podcast participant changed during ABS transfer')
@@ -862,7 +927,7 @@ class PodcastCoordinator:
             if goal['status'] == 'finished': source_stamp = completion
             if source_stamp:
                 values['LastPlayedDate'] = dt.datetime.fromtimestamp(source_stamp / 1000, dt.timezone.utc).isoformat()
-            checkpoint('sending_jellyfin'); self.jf.update(mapping['jf']['id'], values)
+            checkpoint('sending_jellyfin'); self.mutate(self.jf.update, mapping['jf']['id'], values)
             current, fresh = self.read(mapping)
             expected = dict(raw['jf'], **values)
             if (not rows_equal([fresh['jf']], [expected]) or
@@ -978,7 +1043,7 @@ class PodcastCoordinator:
                     raise ValueError('Interrupted PinePods alias action target changed')
             if mapping['jf']['id'] in self.jf.active_ids(): return 'waiting',states
             checkpoint('sending_pinepods_'+str(index))
-            receipt=self.pine.write_action(action)
+            receipt=self.mutate(self.pine.write_action, action)
             if isinstance(receipt,dict) and receipt.get('timestamp') is not None:
                 action['_server_timestamp']=action_epoch(receipt['timestamp'])
                 checkpoint('sending_pinepods_'+str(index))
@@ -1001,7 +1066,10 @@ class PodcastCoordinator:
         guard(self.b)
         if self.pine: self.accounts['pinepods']=self.pine.identity
         self.account_guard(apply)
-        mappings, issues = self.mappings()
+        from observation_snapshot import ObservationBatch
+        self.observation = ObservationBatch(self.b)
+        with self.observing():
+            mappings, issues = self.mappings()
         if apply and self.pine:
             from pine_metadata_repair import metadata_probe_order
             mappings = metadata_probe_order(self.b, mappings)

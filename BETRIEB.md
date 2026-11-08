@@ -29,7 +29,7 @@ Fortschrittsabgleich, Bibliothekserkennung und Dateiprüfung haben getrennte Abl
 
 Der Positionsindex liegt als versionsgebundene JSON-Datei unter `state/ebook-index-cache`, mit maximal 64 MiB und 64 Dateien sowie einem kleinen RAM-Cache. Das gesamte `state`-Verzeichnis sollte auf einer SSD liegen. Es wird keine Kopie der Mediendatei angelegt. Fehlende oder beschädigte Indizes werden aus aktuell geprüften Originalbytes neu erstellt; ein Cachetreffer ersetzt keine Dateiprüfung für eine Übertragung. Die Cachedateien sind abgeleitete Daten, die Datenbank und Übertragungsjournale bleiben dagegen unverzichtbar.
 
-Medienordner werden gemeinsam geprüft und im unveränderten Leerlauf standardmäßig 15 Minuten wiederverwendet. Vor tatsächlichen E-Book-Dateioperationen und manuellen Medienprüfungen wird der betroffene Ordnertyp erneut sicher geöffnet. Mount-, relevante Deployment- oder Konfigurationsänderungen entwerten den Prüfstand. Die GUI selbst löst keine Ordnerdurchläufe aus; unveränderte Darstellungsdateien werden nicht ständig neu geschrieben. Der Worker-Lebensnachweis wird weiterhin spätestens alle 60 Sekunden veröffentlicht. Die 150-Sekunden-Grenze für echte Deploymentnachweise bleibt bestehen.
+Seit Beta 11 werden Medienordner gemeinsam geprüft und im unveränderten Leerlauf dauerhaft wiederverwendet. Vor tatsächlichen E-Book-Dateioperationen und manuellen Medienprüfungen wird der betroffene Ordnertyp erneut sicher geöffnet. Mount-, relevante Deployment- oder Konfigurationsänderungen entwerten den Prüfstand. Die GUI selbst löst keine Ordnerdurchläufe aus; unveränderte Darstellungsdateien werden nicht ständig neu geschrieben. Der Worker-Lebensnachweis wird weiterhin spätestens alle 60 Sekunden veröffentlicht. Die 150-Sekunden-Grenze für echte Deploymentnachweise bleibt bestehen.
 
 Neue EPUB-Kandidaten werden zunächst anhand von Datei- und API-Metadaten beobachtet. Erst nach mindestens 60 stabilen Sekunden wird der Inhalt vollständig gelesen und indiziert. Bei Podcasts werden gültige negative Wartefristen vor lokalen Pfadprüfungen ausgewertet. Positive Bereitschaft, fällige Audioprobes und echte Änderungen prüfen die lokalen Dateien weiterhin; Werbevarianten und Messnachweise behalten ihre bisherigen Gültigkeitsgrenzen.
 
@@ -41,7 +41,7 @@ Optionale Einstellungen im bestehenden `config/config.json` (nur den Abschnitt e
   "ebook_verify_interval_seconds": 0,
   "ebook_discovery_interval_seconds": 300,
   "ebook_candidate_stable_seconds": 60,
-  "folder_validation_interval_seconds": 900,
+  "folder_validation_interval_seconds": 0,
   "integrity_window_utc": null
 }
 ```
@@ -56,10 +56,20 @@ Gezielte Regressionen:
 python -m unittest test_ebook_io test_ebook_discovery test_folder_io_policy test_podcast_idle_io test_io_policy
 ```
 
-## Podcast-Dateiprüfungen ab Beta 10
+## Dauerhafte Mediennachweise ab Beta 11
 
-Positive lokale Podcast-Prüfergebnisse liegen ausschließlich im RAM des laufenden Workers. Unveränderte API-Quellmetadaten, die GUID, PinePods-Konto und Folgenidentität sowie die vorhandene Mountgeneration müssen weiter übereinstimmen. Ein Cacheeintrag gilt höchstens 900 Sekunden ab der direkten Prüfung; Treffer verlängern diese Frist nicht. Pro Worker werden höchstens 4.096 Einträge gehalten. Ein Neustart leert den Cache. Fehlen belastbare Mountgenerationen, bleibt die direkte Prüfung aktiv.
+Das private `state`-Verzeichnis muss auf der NVMe/SSD liegen. Unter `state/media-observations` liegen begrenzte, abgeleitete JSON-Nachweise für Podcast-Dateien, native Hörbuch-/Mitlese-Ausgaben und Medienordner (maximal 128 MiB, 100.000 Einträge, 128 KiB je Eintrag). E-Books behalten ihren dauerhaften Positionsindex und einen gezielt gebundenen Prüfstand. Es werden keine Mediendateien kopiert. Diese Cacheeinträge sind keine Freigaben und keine Schreibberechtigung; Datenbanken, Schlüssel und Journale müssen weiterhin gesichert werden.
 
-Der Cache spart nur lokale Pfadauflösung und Dateiattributprüfungen. Native Hörstände und API-Identitäten werden weiterhin abgefragt. Er ersetzt keinen frischen Laufzeitnachweis für verschiedene Audiofassungen. Vor einer Statusübertragung, vor jedem schreibenden Übertragungsschritt, bei der Wiederaufnahme offener Journale sowie bei expliziten Prüfungen wird die Datei direkt geprüft. Eine außerhalb der Dienste vorgenommene Dateiersetzung bei unveränderten API-Daten kann im unveränderten Lesebetrieb bis zum Fristende unbemerkt bleiben; sie darf keinen ungeprüften Statusschreibvorgang auslösen.
+Unveränderte positive Nachweise haben **keine zeitliche Ablaufgrenze**. Sie überstehen Containerneustarts. Ein neuer Podcast löst nur Prüfungen seiner eigenen Dateien aus. Aktuelle API-Quellmetadaten, Folgen-/Dateiidentitäten, das persönliche Konto und die relevante Mountgeneration müssen zum gespeicherten Nachweis passen. Fremde Ordneränderungen oder Darstellungsnamen entwerten nicht den ganzen Bestand. Ein tatsächlicher Mountwechsel, eine Dateiänderung laut API, ein fehlender/beschädigter Eintrag oder eine fehlgeschlagene manuelle Prüfung betrifft den jeweiligen Nachweis. Ein Host-Neustart kann eine neue Mountprüfung benötigen.
 
-Unter `io_metrics.media` zeigen `podcast_variant_source_checks` und `podcast_variant_source_cache_hits` direkte Prüfungen und Wiederverwendungen. Für eine Messung mehrere unveränderte Zyklen nach dem ersten vollständigen Prüflauf vergleichen. Der Cache beseitigt keine Zugriffe anderer Mediendienste und garantiert keinen Festplatten-Ruhezustand.
+`folder_validation_interval_seconds: 0` und `ebook_verify_interval_seconds: 0` deaktivieren zusätzliche regelmäßige physische Prüfungen. Bereits ausdrücklich konfigurierte positive Intervalle bleiben erhalten; für dauerhafte Wiederverwendung diese Werte auf `0` setzen. Manuelle Prüfungen und echte Übertragungen bleiben aktuell geprüft. Wird eine Datei außerhalb der Mediendienste bei unveränderten API-Daten ersetzt, erkennt die unveränderte Beobachtung das erst bei einer solchen Verwendung oder zusätzlichen Integritätsprüfung. Ein historischer Cachetreffer darf keinen ungeprüften Transfer freigeben.
+
+Pro Durchlauf werden schreibgeschützte API-Sammelabfragen und Indizes aufgebaut. ABS liefert persönliche Hörstände einmal und jede Podcastserie einmal; PinePods liefert seine paginierten persönlichen Kataloge und GPodder-Aktionen je Feed; Jellyfin liefert den betreffenden Bibliotheksbestand. PinePods-Sammelmetadaten werden je Feed gegen eine vollständige native Antwort abgeglichen. Abweichende Formate verwenden einzelne geprüfte Abfragen. Neue Durchläufe lesen neue Hörstände, sodass Zurücksetzen und Weiterhören erkennbar bleiben. Nach Schreibvorgängen werden die Beobachtungssnapshots verworfen. Frische Kontoprüfung, CAS, Übertragungsrücklesen und Wiederaufnahme verwenden die Originalclients.
+
+Unter `io_metrics` stehen unter anderem `api_observation_requests`, `api_observation_cache_hits`, `api_observation_index_hits` und `native_observation_durable_hits`; unter `io_metrics.media` stehen `podcast_variant_source_checks`, `podcast_variant_source_cache_hits` und `podcast_variant_source_disk_hits`. Zähler starten beim Worker-Neustart neu. Nach einem ersten Prüf-/Migrationsdurchlauf mindestens mehrere unveränderte Zyklen und mehr als 15 Minuten beobachten; zusätzlich einen Worker-Neustart prüfen. Diese Programmzähler und Pfad-Syscalls unterscheiden sich von physischen Plattenzugriffen. Andere Mediendienste können die HDD weiterhin aufwecken.
+
+Gezielte Regressionen:
+
+```sh
+python -m unittest test_podcast_durable_io test_folder_durable_io test_ebook_standby test_native_durable_io test_podcast_bulk_io
+```

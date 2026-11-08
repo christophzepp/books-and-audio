@@ -336,6 +336,11 @@ class Administration:
             return self.folders.generation(kind, context=self.folder_context(kind))
         return None
 
+    def media_observation_generation(self, kind):
+        if self.folders is not None:
+            return self.folders.observation_generation(kind, context=self.folder_context(kind))
+        return None
+
     def publish_changed(self, name, value, *, heartbeat=None):
         """Deduplicate disposable GUI snapshots; keep a bounded live heartbeat.
 
@@ -890,6 +895,7 @@ def run_admin_loop(args, root, config, credentials, bridge_type):
                     bridge.serve_preview=serve_preview
                     bridge.media_guard=admin.media_guard
                     bridge.media_generation=admin.media_generation
+                    bridge.media_observation_generation=admin.media_observation_generation
                 signature = current; next_cycle = 0
             admin.publish(bridge, disabled)
             if admin.process_one(bridge):

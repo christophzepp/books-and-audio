@@ -19,7 +19,7 @@ NAMESPACE='_pine_variant_proof:'
 MAX_AGE=30*86400
 FRESH_SECONDS=150
 MAX_RECORD=128*1024
-SOURCE_CACHE_SECONDS=900
+SOURCE_CACHE_SECONDS=None  # Historical observations have no time-based expiry.
 SOURCE_CACHE_ENTRIES=4096
 FULL_REASONS={'mpeg_audio_without_frame_count_tag','id3_exceeds_prefix','no_valid_frame_count_header'}
 
@@ -112,16 +112,27 @@ class VariantProof:
     def __init__(self,bridge,probe=None):
         self.b=bridge;self.probe=probe;self.remaining=2;self.deadline=None;self.full_used=False
 
+    def _observations(self):
+        from media_observation import ObservationStore
+        store=getattr(self.b,'_podcast_observations',None)
+        if store is None:
+            store=ObservationStore(getattr(self.b,'root',None))
+            self.b._podcast_observations=store
+        return store
+
     def _forget_source(self,mapping):
         cache=getattr(self.b,'_podcast_source_cache',None)
         if isinstance(cache,dict):
             for slot in list(cache):
                 if slot[0]==mapping['id']:cache.pop(slot,None)
+        store=self._observations()
+        for role in ('candidate','native'):store.forget('podcast-source',[mapping['id'],role])
 
     def _source(self,mapping):
         try:return self._inspect_source(mapping)
-        except Exception:
-            self._forget_source(mapping)
+        except Exception as exc:
+            from podcast_sync import service_unavailable
+            if not service_unavailable(exc):self._forget_source(mapping)
             raise
 
     def _inspect_source(self,mapping):
@@ -152,52 +163,71 @@ class VariantProof:
                               mtime_ns=info.st_mtime_ns,ctime_ns=info.st_ctime_ns),jellyfin=mapping.get('jf'))
 
     def source_snapshot(self,mapping,*,allow_cached=False,identity=None):
-        """Reuse local stat evidence only for observing an unchanged identity.
+        """Durable per-episode historical evidence, never write permission.
 
-        The bridge owns this bounded in-memory cache across cycle helpers. Its
-        key uses current API identities and virtual mount-generation evidence;
-        looking up a hit never resolves or stats a media path. It is not a new
-        measurement receipt. Refresh/admission and every mutation bypass it.
+        Only current API identities and the relevant stable media generation
+        form the lookup key. Time, process/container identity and unrelated
+        episodes/configuration cannot expire an unchanged observation. Refresh,
+        admission, journal recovery and every mutation bypass this fast path.
         """
         from pine_metadata_repair import api_source
-        from podcast_sync import settings
+        from podcast_sync import settings,service_unavailable
         from io_metrics import increment
+        reader=getattr(self.b,'media_observation_generation',None)
+        if not callable(reader):reader=getattr(self.b,'media_generation',None)
         generation=None
-        reader=getattr(self.b,'media_generation',None)
         if callable(reader):
             try:generation=reader('podcasts')
             except (OSError,ValueError):generation=None
         usable=isinstance(generation,str) and bool(generation)
         if not usable:
-            self._forget_source(mapping)
+            # Missing availability evidence cannot authorize a historical hit;
+            # retain the historical checkpoint for the service's recovery.
             return self._source(mapping)
         try:current=api_source(self.b,mapping,require_guid=True)
-        except Exception:
-            self._forget_source(mapping)
+        except Exception as exc:
+            if not service_unavailable(exc):self._forget_source(mapping)
             raise
-        now=self.b.clock();monotonic=time.monotonic()
+        cfg=settings(self.b)
+        local_config={k:cfg.get(k) for k in ('abs_library_id','jellyfin_library_id',
+            'abs_root','jellyfin_root','worker_root','expected_abs_username')}
+        jf_config=self.b.config.get('jellyfin') or {}
+        relevant_jf={k:jf_config.get(k) for k in ('url','user_id','username','version')}
         slot=(mapping['id'],'candidate' if identity is None else 'native')
-        signature=digest(dict(api=current,guid=mapping.get('abs_guid'),identity=identity,
-            config=settings(self.b),folders=self.b.config.get('folder_mappings'),
-            abs_url=self.b.config.get('abs_url'),jellyfin=self.b.config.get('jellyfin'),
-            generation=generation))
+        binding=dict(api=current,guid=mapping.get('abs_guid'),identity=identity,
+            config=local_config,abs_url=self.b.config.get('abs_url'),jellyfin=relevant_jf,
+            generation=generation)
+        signature=digest(binding)
         cache=getattr(self.b,'_podcast_source_cache',None)
         if not isinstance(cache,dict):cache={};self.b._podcast_source_cache=cache
         previous=cache.get(slot)
-        if (allow_cached and usable and isinstance(previous,dict)
-                and previous.get('signature')==signature
-                and finite(now) and finite(monotonic)
-                and 0<=now-previous['at']<SOURCE_CACHE_SECONDS
-                and 0<=monotonic-previous['monotonic']<SOURCE_CACHE_SECONDS):
+        if allow_cached and isinstance(previous,dict) and previous.get('signature')==signature:
             increment(self.b,'podcast_variant_source_cache_hits')
             return copy.deepcopy(previous['source'])
-        # Remove the previous positive before checking. Failed validation,
-        # unavailable generations and clock rollback cannot retain readiness.
+        store=self._observations()
+        historical=store.get('podcast-source',list(slot),binding) if allow_cached else None
+        if historical is not None:
+            # The record checksum protects storage corruption; additionally
+            # pin its data shape to the live API metadata before using it.
+            if (isinstance(historical,dict) and set(historical)=={'mapping','file','jellyfin'}
+                    and historical['mapping']==current['mapping']
+                    and historical['jellyfin']==current['jellyfin']
+                    and isinstance(historical['file'],dict)
+                    and set(historical['file'])=={'device','inode','size','mtime_ns','ctime_ns'}
+                    and all(type(v)is int and v>=0 for v in historical['file'].values())
+                    and historical['file']['size']==mapping['size']):
+                if len(cache)>=SOURCE_CACHE_ENTRIES:cache.pop(next(iter(cache)))
+                cache[slot]=dict(signature=signature,source=copy.deepcopy(historical))
+                increment(self.b,'podcast_variant_source_cache_hits')
+                increment(self.b,'podcast_variant_source_disk_hits')
+                return historical
+        # A different API/generation, unknown/corrupt record or actual work
+        # validates only this episode. Failures cannot leave stale RAM evidence.
         cache.pop(slot,None)
         source=self._source(mapping)
-        if usable and finite(now) and finite(monotonic):
-            if len(cache)>=SOURCE_CACHE_ENTRIES:cache.pop(next(iter(cache)))
-            cache[slot]=dict(signature=signature,at=now,monotonic=monotonic,source=copy.deepcopy(source))
+        if len(cache)>=SOURCE_CACHE_ENTRIES:cache.pop(next(iter(cache)))
+        cache[slot]=dict(signature=signature,source=copy.deepcopy(source))
+        store.put('podcast-source',list(slot),binding,source)
         return source
 
     def _pending(self,mapping):
@@ -254,7 +284,7 @@ class VariantProof:
             return None
         return copy.deepcopy(evidence)
 
-    def _cache(self,record,source,clock):
+    def _cache(self,record,source,clock,*,historical=False):
         if not record:return None
         if (not isinstance(record,dict) or record.get('schema')!=1 or record.get('stage') not in ('verified','deferred')
                 or len(encoded(record).encode())>MAX_RECORD):raise ValueError('variant_cache_requires_review')
@@ -264,7 +294,8 @@ class VariantProof:
                 or record.get('source_fingerprint')!=digest(binding)
                 or not finite(own) or not 1<=own<=172800
                 or record.get('proof_fingerprint')!=digest({'binding':binding,'own_duration':own})
-                or not finite(record.get('validated_at')) or clock<record['validated_at']
+                or not finite(record.get('validated_at')) or record['validated_at']<0
+                or not historical and clock<record['validated_at']
                 or record['validated_at']!=evidence_epoch(record.get('evidence',{}))
                 or not validated_audio(record.get('evidence'),source['mapping']['enclosure_url'],record['validated_at'])
                 or abs(record['evidence']['duration_seconds']-own)>2):
@@ -273,7 +304,8 @@ class VariantProof:
                                      source_fingerprint=record['source_fingerprint']))
         if (not isinstance(origin,dict) or set(origin)!={'evidence','validated_at','source_fingerprint'}
                 or origin['source_fingerprint']!=record['source_fingerprint']
-                or not finite(origin['validated_at']) or not 0<=origin['validated_at']<=clock
+                or not finite(origin['validated_at']) or origin['validated_at']<0
+                or not historical and origin['validated_at']>clock
                 or not validated_variant(origin['evidence'],source['mapping']['enclosure_url'],
                                          source['mapping']['duration'],origin['validated_at'])):
             raise ValueError('variant_original_evidence_changed')
@@ -289,7 +321,7 @@ class VariantProof:
         try:
             if self.b.load('_pine_alias:'+mapping['id']) or mapping.get('_pine_alias_fingerprint'):return False
             source=self.source_snapshot(mapping,allow_cached=True);clock=self.b.clock()
-            cached=self._cache(self.b.load(NAMESPACE+mapping['id']),source,clock)
+            cached=self._cache(self.b.load(NAMESPACE+mapping['id']),source,clock,historical=True)
             return cached is not None or self._seed(mapping,source,clock) is not None
         except Exception as exc:
             from podcast_sync import service_unavailable
@@ -377,15 +409,19 @@ class VariantProof:
             if old_account is not None and old_account!=account:return refused('variant_account_changed')
             if native is not None and native_binding(native,mapping,account)!=identity:return refused('variant_native_identity_changed')
             source=self.source_snapshot(mapping,allow_cached=not refresh and not force_source,identity=identity)
-            stored=self.b.load(key);cached=self._cache(stored,source,clock)
+            stored=self.b.load(key);cached=self._cache(stored,source,clock,historical=not refresh)
             evidence=cached['evidence'] if cached else self._seed(mapping,source,clock)
             if evidence is None:return refused('variant_measured_evidence_required')
             binding={'source':source,'native':identity};source_fingerprint=digest(binding)
             if cached and cached['binding']!=binding:return refused('variant_native_identity_changed')
             if not refresh:
                 if cached:
-                    if not validated_audio(cached['evidence'],mapping['enclosure_url'],clock):
+                    if self._progress_pending(mapping) and not validated_audio(cached['evidence'],mapping['enclosure_url'],clock):
                         return refused('variant_cached_evidence_expired')
+                    # Observation of an unchanged source never refreshes an
+                    # old remote measurement merely because time has passed.
+                    # Actual writes still demand refreshed(), fresh=True and
+                    # the separate 150-second measurement receipt.
                     return self._response(cached)
                 return refused('fresh_variant_proof_required',own_duration=evidence['duration_seconds'],source_fingerprint=source_fingerprint)
             if cached is None and self._progress_pending(mapping):return refused('variant_pending_proof_pin')

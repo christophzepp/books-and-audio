@@ -12,7 +12,7 @@ from episode_editor import route_proof
 from podcast_review import reported_proof
 from podcast_sync import PodcastCoordinator, build_mapping, fingerprint
 from podcast_status_sync import StatusCoordinator, StatusConflict, state_key, version_receipt
-from podcast_variant_proof import VariantProof, SOURCE_CACHE_SECONDS, NAMESPACE, digest
+from podcast_variant_proof import VariantProof, NAMESPACE, digest
 from test_pine_metadata_repair import Bridge
 from test_podcast_variant_proof import proof
 
@@ -81,27 +81,20 @@ class PositiveIdleIOTests(unittest.TestCase):
                     for _ in range(20):self.assertFalse(fn()['fresh'])
                 self.assertEqual(self.b.pinepods.reads-previous_reads,20)
 
-    def test_expiry_is_fixed_not_renewed_by_idle_hits(self):
+    def test_historical_observations_do_not_expire_with_elapsed_time(self):
         self.warm()
-        self.b.time+=SOURCE_CACHE_SECONDS-1;self.monotonic+=SOURCE_CACHE_SECONDS-1
-        with patch.object(VariantProof,'_source',side_effect=AssertionError('early recheck')):
-            self.assertTrue(self.inspect()['ready'])
-        self.b.time+=1;self.monotonic+=1
-        actual=VariantProof(self.b)._source
-        with patch.object(VariantProof,'_source',side_effect=actual) as checked:
-            self.assertTrue(self.inspect()['ready'])
-        checked.assert_called_once()
+        self.b.time+=90*86400;self.monotonic+=90*86400
+        with patch.object(VariantProof,'_source',side_effect=AssertionError('age-driven media check')):
+            result=self.inspect()
+            self.assertTrue(result['ready']);self.assertFalse(result['fresh'])
+        self.probe.assert_not_called()
 
-    def test_either_wall_or_monotonic_clock_rollback_requires_recheck(self):
-        for clock in ('wall','monotonic'):
-            with self.subTest(clock=clock):
-                self.warm()
-                if clock=='wall':self.b.time-=1
-                else:self.monotonic-=1
-                with patch.object(VariantProof,'_source',side_effect=ValueError('source changed')) as checked:
-                    self.assertFalse(self.inspect()['ready'])
-                checked.assert_called_once()
-                self.b.time=1000;self.monotonic=1000
+    def test_clock_changes_do_not_make_a_historical_observation_fresh(self):
+        self.warm();self.b.time-=1;self.monotonic-=1
+        with patch.object(VariantProof,'_source',side_effect=AssertionError('clock-driven media check')):
+            result=self.inspect()
+            self.assertTrue(result['ready']);self.assertFalse(result['fresh'])
+        self.probe.assert_not_called()
 
     def test_missing_or_failed_generation_disables_reuse(self):
         for failure in (None,'',ValueError('unavailable')):
@@ -116,7 +109,7 @@ class PositiveIdleIOTests(unittest.TestCase):
 
     def test_generation_config_and_jellyfin_change_do_not_reuse_source(self):
         changes=(lambda:setattr(self,'generation','mount-generation-2'),
-                 lambda:self.b.config.update(folder_mappings=[dict(identity='new')]),
+                 lambda:self.b.config.update(abs_url='http://replacement'),
                  lambda:self.mapping['jf'].update(id='replacement'))
         for change in changes:
             with self.subTest(change=changes.index(change)):

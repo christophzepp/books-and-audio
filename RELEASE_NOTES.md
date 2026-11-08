@@ -1,3 +1,14 @@
+## 0.1.0-beta.11 – Dauerhafte Nachweise und Sammelabfragen
+
+- Bestätigte Podcast-Dateizuordnungen und Medienordner werden dauerhaft im privaten Zustandsverzeichnis gespeichert. Unveränderte Nachweise verfallen nicht nach 15 Minuten und bleiben bei einem Containerneustart erhalten. Das Zustandsverzeichnis gehört auf die NVMe/SSD.
+- Nur geänderte Folgen, relevante Konten, Quellen oder Mounts entwerten ihre Nachweise. Eine neue Folge, eine Titeländerung oder eine Änderung eines anderen Medientyps führt nicht mehr zur erneuten Prüfung des gesamten Bestands.
+- E-Books und native Hörbuch-/Mitlese-Ausgaben verwenden ebenfalls dauerhafte, gezielt gebundene Prüfnachweise. Unveränderte Ausgaben benötigen keine erneute EPUB-Inhaltslesung, Hashberechnung oder BookOrbit-Dateiübertragung.
+- Beobachtungen bündeln Audiobookshelf-Folgen, persönliche Fortschritte, PinePods-Kataloge und GPodder-Aktionen sowie Jellyfin-Bestände pro Durchlauf. Getestet mit 1.000 Folgen: zwei ABS-Anfragen, zehn PinePods-Anfragen inklusive Paginierung und eine Jellyfin-Bestandsabfrage. Unerwartete PinePods-Metadatenformate verwenden weiterhin einzelne geprüfte Abfragen.
+- Wiederverwendete Nachweise sind historische Beobachtungen. Tatsächliche Übertragungen, offene Journale, neue Zuordnungen und explizite Prüfungen verwenden aktuelle Originalprüfungen. Hörstände, Freigaben und Identitätsregeln werden nicht durch Cacheeinträge ersetzt.
+- Der Cache ist begrenzt; fehlende oder beschädigte Einträge werden gezielt neu aufgebaut. Neue Zähler zeigen dauerhafte Treffer und gebündelte API-Abfragen. Dateien, die außerhalb der Mediendienste verändert werden, bleiben ohne API-Änderung bis zur tatsächlichen Verwendung oder einer manuellen/optional zeitgesteuerten Prüfung unbemerkt.
+
+Docker: `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.11` oder `beta`, für Linux AMD64 und ARM64. Bestehende Verbindungen, Freigaben, Hörstände und Dockge-Mounts bleiben kompatibel. [Betrieb und Messung](BETRIEB.md#dauerhafte-mediennachweise-ab-beta-11).
+
 ## 0.1.0-beta.10 – Weniger Podcast-Dateiprüfungen
 
 - Bereits geprüfte lokale Podcast-Dateizuordnungen werden bei unveränderten API-, Konto- und Mountidentitäten im Arbeitsspeicher wiederverwendet. Die Gültigkeit endet spätestens nach 15 Minuten und wird durch Cachetreffer nicht verlängert.

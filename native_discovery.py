@@ -425,9 +425,23 @@ def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, t
         if seed is None:
             raise
         origin = _origin(proof, seed)
-    key = signature({'current': proof, 'origin': origin})
+    binding=getattr(bo,'observation_binding',None)
+    key = signature({'current': proof, 'origin': origin,
+                     'service':binding() if callable(binding) else None})
     cache = getattr(bo, '_native_full_hash_cache', {})
     digests = cache.get(key) if cache_ok and origin is not None else None
+    from media_observation import ObservationStore
+    from io_metrics import increment
+    observations=ObservationStore(getattr(bo,'observation_root',None))
+    observation_key=expected['abs_id']
+    if cache_ok and origin is not None and digests is None:
+        saved=observations.get('native-readalong',observation_key,key)
+        if isinstance(saved,dict) and saved.get('invalid') is True:
+            raise ValueError('Native full-file SHA256 changed; a new completed generation job is required')
+        if (isinstance(saved,dict) and set(saved)=={'source','overlay'}
+                and all(isinstance(saved[r],str) and re.fullmatch('[0-9a-f]{64}',saved[r]) for r in saved)):
+            digests=saved
+            increment(getattr(bo,'observation_metrics',bo),'native_observation_durable_hits')
     if digests is None:
         digests = {}
         for role in ('source', 'overlay'):
@@ -445,6 +459,8 @@ def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, t
             raise ValueError('Native evidence changed during full-file hashing')
     if origin is not None:
         if any(digests[role] != origin[role]['sha256'] for role in ('source', 'overlay')):
+            cache.pop(key,None)
+            observations.put('native-readalong',observation_key,key,{'invalid':True})
             raise ValueError('Native full-file SHA256 changed; a new completed generation job is required')
         result = copy.deepcopy(origin)  # Preserve the actual initially witnessed API times.
     else:
@@ -453,9 +469,12 @@ def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, t
         result['sha256_evidence'] = {'kind': 'publication'}
         for role in ('source', 'overlay'):
             result[role]['sha256'] = digests[role]
-    if cache_ok and origin is not None:
-        # Memory only, exact full observed proof + trusted publication. A new
-        # API contentVersion or process restart forces another complete hash.
+    if origin is not None:
+        # Historical full-file evidence is reusable only for unchanged API
+        # observations; real transfers call collect(cache_ok=False). A fresh
+        # successful verification also replaces a previously failed checkpoint.
+        if observations.get('native-readalong',observation_key,key)!=digests:
+            observations.put('native-readalong',observation_key,key,digests)
         cache[key] = dict(digests)
         if len(cache) > 256:
             cache.pop(next(iter(cache)))

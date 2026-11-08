@@ -44,6 +44,10 @@ class ABSClient:
         self.session.trust_env = False
         self.session.headers.update({"Authorization": "Bearer " + token})
 
+    def observation_snapshot(self):
+        from observation_snapshot import ABSObservation
+        return ABSObservation(self)
+
     def close(self):
         self.session.close()
 

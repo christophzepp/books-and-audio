@@ -9,11 +9,12 @@ from io_metrics import increment, snapshot
 class IOPolicyTests(unittest.TestCase):
     def test_defaults_do_not_add_background_full_reads(self):
         self.assertFalse(integrity_due({}, 1000, None))
+        self.assertEqual(settings({})['folder_validation_interval_seconds'], 0)
         self.assertEqual(settings({})['ebook_discovery_interval_seconds'], 300)
 
     def test_invalid_configuration_does_not_silently_relax_checks(self):
         for value in ([], None, {'unknown': 1}, {'ebook_cache_max_bytes': True},
-                      {'folder_validation_interval_seconds': 0},
+                      {'folder_validation_interval_seconds': 1},
                       {'ebook_verify_interval_seconds': float('nan')},
                       {'ebook_candidate_stable_seconds': 1},
                       {'integrity_window_utc': {'start_hour': 3, 'end_hour': 3}}):

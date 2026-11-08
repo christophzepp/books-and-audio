@@ -8,7 +8,7 @@ DEFAULTS = {
     'ebook_verify_interval_seconds': 0,
     'ebook_discovery_interval_seconds': 300,
     'ebook_candidate_stable_seconds': 60,
-    'folder_validation_interval_seconds': 900,
+    'folder_validation_interval_seconds': 0,
     'integrity_window_utc': None,
 }
 
@@ -22,12 +22,14 @@ def settings(config):
         'ebook_cache_max_bytes': (1024 * 1024, 512 * 1024 * 1024),
         'ebook_discovery_interval_seconds': (60, 86400),
         'ebook_candidate_stable_seconds': (60, 86400),
-        'folder_validation_interval_seconds': (60, 86400),
     }
     for name, (minimum, maximum) in limits.items():
         value = result[name]
         if type(value) is not int or not minimum <= value <= maximum:
             raise ValueError('Invalid media I/O policy: ' + name)
+    folder_interval = result['folder_validation_interval_seconds']
+    if type(folder_interval) is not int or folder_interval != 0 and not 60 <= folder_interval <= 86400:
+        raise ValueError('Invalid media I/O policy: folder_validation_interval_seconds')
     interval = result['ebook_verify_interval_seconds']
     if type(interval) is not int or (interval != 0 and not 60 <= interval <= 365 * 86400):
         raise ValueError('Invalid media I/O policy: ebook_verify_interval_seconds')

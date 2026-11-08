@@ -19,6 +19,7 @@ import stat
 import time
 import uuid
 from io_metrics import increment
+from media_observation import ObservationStore
 
 
 class FolderManagerError(ValueError):
@@ -170,17 +171,26 @@ class FolderManager:
         self.path = self.root / 'folders.json'
         self.base_config = copy.deepcopy(base_config)
         self.mount_checker = mount_checker or os.path.ismount
-        self.generation_reader = generation_reader or self._mount_generation
+        self.generation_reader = generation_reader
+        self._runtime_mounts = {}
+        self.observations = ObservationStore(Path(root))
         self.clock = clock or time.monotonic
         self._checks = {}
         self._generation = None
         self._context = None
         self._state_signature = None
-        self._error_epochs = {kind: 0 for kind in KINDS}
-        self._invalidation_epoch = 0
+        self._epoch_nonces = {}
+        self._error_epochs = {kind: self._load_epoch(kind) for kind in KINDS}
+        self._invalidation_epoch = self._load_epoch('all')
         roots = access_roots if access_roots is not None else base_config.get('folder_access_roots')
         if roots is None:
-            roots = [dict(worker=p) for p in ('/audiobooks', '/ebooks', '/podcasts') if self.mount_checker(p)]
+            candidates = ('/audiobooks', '/ebooks', '/podcasts')
+            if mount_checker is not None:
+                roots = [dict(worker=p) for p in candidates if self.mount_checker(p)]
+            else:
+                virtual = self._mount_generation(candidates)
+                targets = {m[2] for m in virtual['stable'][1]} if virtual else set()
+                roots = [dict(worker=p) for p in candidates if p in targets]
         if not isinstance(roots, list) or len(roots) > 100:
             fail('invalid_folder_access_roots')
         self.access_roots = []
@@ -203,12 +213,50 @@ class FolderManager:
         self.initial = initial
 
     @staticmethod
-    def _mount_generation():
-        # procfs metadata lives in memory. Never touch the media roots to render
-        # the GUI. Absence of a readable generation disables reuse of positives.
+    def _mount_generation(paths=None):
+        """Kernel-only, scoped mount identity stable across worker recreation.
+
+        Container-local mount IDs are runtime change detectors, not persistent
+        identities. Overlay/config mounts unrelated to the selected media roots
+        cannot invalidate their history. A host reboot changes boot_id.
+        """
         try:
-            return hashlib.sha256(Path('/proc/self/mountinfo').read_bytes()).hexdigest()
-        except OSError:
+            raw = Path('/proc/self/mountinfo').read_text()
+            boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            if not boot or len(raw) > 16 * 1024 * 1024:
+                return None
+            selected = [clean_path(p) for p in paths or []]
+            if not selected:
+                return None
+            mounts = []
+            def unescape(value):
+                return re.sub(r'\\(040|011|012|134)', lambda m: chr(int(m[1], 8)), value)
+            for line in raw.splitlines():
+                left, separator, right = line.partition(' - ')
+                a, z = left.split(), right.split()
+                if not separator or len(a) < 6 or len(z) < 3:
+                    return None
+                target = PurePosixPath(unescape(a[4]))
+                if not target.is_absolute():
+                    return None
+                stable = [a[2], unescape(a[3]), str(target), sorted(a[5].split(',')),
+                          z[0], unescape(z[1]), sorted(z[2].split(','))]
+                mounts.append((target, stable, a[0]))
+            covered = {}
+            for path in selected:
+                parents = [m for m in mounts if path.is_relative_to(m[0])]
+                if not parents:
+                    return None
+                deepest = max(len(m[0].parts) for m in parents)
+                roots = [m for m in parents if len(m[0].parts) == deepest]
+                if len(roots) != 1:
+                    return None
+                for mount in roots + [m for m in mounts if m[0] != path and m[0].is_relative_to(path)]:
+                    covered[str(mount[0])] = mount
+            ordered = [covered[k] for k in sorted(covered)]
+            return dict(stable=[boot, [m[1] for m in ordered]],
+                        runtime=[m[2] for m in ordered])
+        except (OSError, ValueError, TypeError):
             return None
 
     @staticmethod
@@ -216,77 +264,193 @@ class FolderManager:
         return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
                                         allow_nan=False).encode()).hexdigest()
 
-    def _record_check(self, row):
+    @staticmethod
+    def _row_identity(row):
+        return {key: copy.deepcopy(row[key]) for key in ('id', 'kind', 'paths')}
+
+    def _load_epoch(self, key):
+        """Keep recovered history stable across restarts, failing closed on loss.
+
+        The random incarnation prevents a missing/corrupt epoch from rolling
+        back to an old generation-zero proof elsewhere in the cache. Only this
+        NVMe history is touched; no media path is consulted.
+        """
+        saved = self.observations.get('folder-epoch', key, {'schema': 1})
+        if (isinstance(saved, dict) and set(saved) == {'epoch', 'nonce'}
+                and type(saved['epoch']) is int and saved['epoch'] >= 0
+                and isinstance(saved['nonce'], str)
+                and re.fullmatch(r'[0-9a-f]{32}', saved['nonce'])):
+            self._epoch_nonces[key] = saved['nonce']
+            return saved['epoch']
+        self._epoch_nonces[key] = uuid.uuid4().hex
+        self.observations.put('folder-epoch', key, {'schema': 1},
+                              dict(epoch=0, nonce=self._epoch_nonces[key]))
+        return 0
+
+    def _bump_epoch(self, key):
+        if key == 'all':
+            self._invalidation_epoch += 1
+            value = self._invalidation_epoch
+        else:
+            self._error_epochs[key] += 1
+            value = self._error_epochs[key]
+        self.observations.put('folder-epoch', key, {'schema': 1},
+                              dict(epoch=value, nonce=self._epoch_nonces[key]))
+
+    def _mount_scope(self, kind, rows):
+        try:
+            if self.generation_reader is not None:
+                value = self.generation_reader()
+            else:
+                value = self._mount_generation([row['paths']['worker'] for row in rows])
+        except Exception:
+            value = None
+        if isinstance(value, str) and value:
+            stable, runtime = value, value
+        elif (isinstance(value, dict) and set(value) == {'stable', 'runtime'}
+                and value.get('stable') and value.get('runtime')):
+            stable, runtime = value['stable'], value['runtime']
+        else:
+            return None
+        runtime = self._signature(runtime)
+        previous = self._runtime_mounts.get(kind)
+        if previous is not None and previous != runtime:
+            self._bump_epoch(kind)
+        self._runtime_mounts[kind] = runtime
+        return stable
+
+    def _local_binding(self, row, mount):
+        roots = [root for root in self.access_roots if _under(row['paths']['worker'], root['worker']) is not None]
+        return dict(row=self._row_identity(row), roots=roots, mount=mount,
+                    epoch=self._error_epochs[row['kind']], epoch_nonce=self._epoch_nonces[row['kind']],
+                    invalidation=self._invalidation_epoch, invalidation_nonce=self._epoch_nonces['all'])
+
+    def _record_check(self, row, binding=None):
         key = self._signature(row)
         try:
             proof = self.check(row)
             check = dict(ok=True, code=proof['code'])
         except FolderManagerError as exc:
             check = dict(ok=False, code=str(exc))
-            self._error_epochs[row['kind']] += 1
-        self._checks[key] = dict(check=check, at=self.clock(),
+            self._bump_epoch(row['kind'])
+            if binding is not None:
+                binding = dict(binding, epoch=self._error_epochs[row['kind']])
+            self.observations.forget('folders', row['id'])
+        self._checks[key] = dict(check=check, at=self.clock(), binding=binding,
                                 identity=proof.get('identity') if check['ok'] else None)
+        if check['ok'] and binding is not None:
+            self.observations.put('folders', row['id'], binding,
+                                  dict(check=check, identity=proof['identity']))
         return check
 
     def invalidate(self):
-        """Forget physical evidence after a failed operation or changed input."""
+        """Forget physical evidence after an explicit global invalidation."""
         self._checks.clear()
         self._generation = None
-        self._invalidation_epoch += 1
+        self._bump_epoch('all')
 
-    def _sample_generation(self, state, context=None):
-        context = self._context if context is None else context
-        try:
-            mount = self.generation_reader()
-        except Exception:
-            mount = None
-        if not isinstance(mount, str) or not mount:
-            return None
-        return self._signature([mount, context, state])
+    @staticmethod
+    def _structural_context(context, rows):
+        if not isinstance(context, dict):
+            return context
+        result = {k: copy.deepcopy(v) for k, v in context.items()
+                  if not (k.endswith('_ok') or k.endswith('_errors'))
+                  and k not in {'ok', 'checked_at', 'deployment_unavailable'}}
+        endpoints = {endpoint: path for row in rows for endpoint, path in row['paths'].items()
+                     if endpoint != 'server'}
+        for key in ('folder_mounts', 'podcast_mounts'):
+            mounts = result.get(key)
+            if isinstance(mounts, dict):
+                scoped = {}
+                for endpoint, value in mounts.items():
+                    if endpoint not in endpoints:
+                        continue
+                    if isinstance(value, list):
+                        value = [item for item in value if isinstance(item, dict)
+                                 and isinstance(item.get('destination'), str)
+                                 and (_under(endpoints[endpoint], item['destination']) is not None
+                                      or _under(item['destination'], endpoints[endpoint]) is not None)]
+                    scoped[endpoint] = value
+                result[key] = scoped
+        return result
 
-    def generation(self, kind=None, *, context=None):
-        """Cheap cache binding; an unavailable mount generation is never a hit."""
+    def observation_generation(self, kind=None, *, context=None):
+        """Stable read-only history binding; it never grants a fresh file proof."""
         if kind is not None and kind not in KINDS:
             fail('invalid_folder_kind')
         state, _ = self._read()
-        generation = self._sample_generation(state, context)
-        if generation is None:
-            fail('folder_generation_unavailable')
-        errors = self._error_epochs if kind is None else self._error_epochs[kind]
-        return self._signature([generation, self._invalidation_epoch, errors])
+        kinds = [kind] if kind is not None else sorted(KINDS)
+        values = []
+        for selected in kinds:
+            rows = [row for row in state['rows'] if row['active'] and row['kind'] == selected]
+            if not rows:
+                values.append([selected, []])
+                continue
+            mount = self._mount_scope(selected, rows)
+            if mount is None:
+                fail('folder_generation_unavailable')
+            roots = [root for root in self.access_roots if any(
+                _under(row['paths']['worker'], root['worker']) is not None for row in rows)]
+            values.append([selected, mount, [self._row_identity(row) for row in rows], roots,
+                           self._structural_context(self._context if context is None else context, rows),
+                           [self._epoch_nonces['all'], self._invalidation_epoch],
+                           [self._epoch_nonces[selected], self._error_epochs[selected]]])
+        return self._signature(values)
+
+    def generation(self, kind=None, *, context=None):
+        return self.observation_generation(kind, context=context)
 
     def refresh(self, *, force=False, kind=None, context=None):
-        """Refresh one shared snapshot, never inactive folders during idle work.
+        """Reuse durable local history; only changed rows or explicit work walk media.
 
-        A real file operation calls require() for its kind. Ordinary GUI/config
-        reads reuse this snapshot until the bounded integrity interval expires.
-        context is host deployment identity, excluding only its observation time;
-        it never extends or replaces the separate 150-second deployment guard.
+        interval=0 means no time-triggered positive checks. A configured positive
+        interval is an opt-in integrity audit. Fresh deployment/operation guards
+        are independent; this historical observation is never such a receipt.
         """
         if kind is not None and kind not in KINDS:
             fail('invalid_folder_kind')
         state, _ = self._read()
         if context is not None:
             self._context = copy.deepcopy(context)
-        signature = self._signature(state)
-        generation = self._sample_generation(state, context)
-        if signature != self._state_signature or generation != self._generation:
-            self._checks.clear()
-            self._state_signature, self._generation = signature, generation
+        self._state_signature = self._signature(state)
         from io_policy import settings
         interval = settings(self.base_config)['folder_validation_interval_seconds']
         now = self.clock()
+        scopes = {}
+        for selected in KINDS:
+            selected_rows = [row for row in state['rows'] if row['active'] and row['kind'] == selected]
+            if selected_rows and (kind is None or kind == selected):
+                scopes[selected] = self._mount_scope(selected, selected_rows)
         for row in state['rows']:
             if not row['active'] or kind is not None and row['kind'] != kind:
                 continue
-            previous = self._checks.get(self._signature(row))
-            retry_interval = interval if previous and previous['check']['ok'] else min(interval, 60)
-            age = now - previous['at'] if previous else retry_interval
-            # If mountinfo is unavailable, never silently trust a cached positive.
-            if force or generation is None or not previous or not 0 <= age < retry_interval:
-                self._record_check(row)
+            key = self._signature(row)
+            mount = scopes[row['kind']]
+            binding = self._local_binding(row, mount) if mount is not None else None
+            previous = self._checks.get(key)
+            if previous is not None and previous.get('binding') != binding:
+                previous = None
+            if not force and interval == 0 and binding is not None and previous is None:
+                saved = self.observations.get('folders', row['id'], binding)
+                if (isinstance(saved, dict) and set(saved) == {'check', 'identity'}
+                        and saved['check'] == {'ok': True, 'code': 'folder_checked'}
+                        and isinstance(saved['identity'], dict)
+                        and set(saved['identity']) == {'device', 'inode'}
+                        and all(type(v) is int and v >= 0 for v in saved['identity'].values())):
+                    previous = dict(check=saved['check'], identity=saved['identity'], at=now, binding=binding)
+                    self._checks[key] = previous
+                    increment(self, 'folder_durable_hits')
+            positive = previous and previous['check']['ok']
+            age = now - previous['at'] if previous else None
+            usable = (previous is not None and binding is not None and age is not None and age >= 0
+                      and (positive and (interval == 0 or age < interval)
+                           or not positive and age < 60))
+            if force or not usable:
+                self._record_check(row, binding)
             else:
                 increment(self, 'folder_snapshot_hits')
+        current_keys = {self._signature(row) for row in state['rows']}
+        self._checks = {key: value for key, value in self._checks.items() if key in current_keys}
         return state
 
     def require(self, kind, *, context=None):
@@ -412,7 +576,7 @@ class FolderManager:
             directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try: os.fsync(directory)
             finally: os.close(directory)
-        self.refresh(force=True)
+        self.refresh()
         return self.public()
 
     def check(self, row):
@@ -450,7 +614,7 @@ class FolderManager:
 
     def public(self):
         state, _ = self._read()
-        checks = self._checks if self._state_signature == self._signature(state) else {}
+        checks = self._checks
         rows = []
         for row in state['rows']:
             result = copy.deepcopy(row)
@@ -532,14 +696,24 @@ class FolderManager:
                         changed = dict(row['paths']); changed.pop('server', None)
                         changed.update(payload['paths']); row['paths'] = self._with_server(changed)
                 if action in {'test', 'activate'} or action == 'update' and row['active']:
+                    mount = self._mount_scope(row['kind'], [row])
+                    binding = self._local_binding(row, mount) if mount is not None else None
                     try:
                         proof = self.check(row)
                     except FolderManagerError as exc:
+                        self._bump_epoch(row['kind'])
+                        if binding is not None:
+                            binding = dict(binding, epoch=self._error_epochs[row['kind']])
+                        self.observations.forget('folders', row['id'])
                         self._checks[self._signature(row)] = dict(
-                            check=dict(ok=False, code=str(exc)), at=self.clock())
+                            check=dict(ok=False, code=str(exc)), at=self.clock(), binding=binding)
                         raise
                     self._checks[self._signature(row)] = dict(
-                        check=dict(ok=True, code=proof['code']), at=self.clock())
+                        check=dict(ok=True, code=proof['code']), at=self.clock(),
+                        binding=binding, identity=proof['identity'])
+                    if binding is not None:
+                        self.observations.put('folders', row['id'], binding,
+                            dict(check=dict(ok=True, code=proof['code']), identity=proof['identity']))
                     if action == 'test':
                         return dict(ok=True, code='folder_checked', revision=revision, folder_id=row['id'], check=proof)
                     if action == 'activate':
@@ -562,7 +736,8 @@ class FolderManager:
                 self._validate_state(state)
                 state['revision'] += 1
                 self._write(state, raw)
-                self.invalidate()
+                # Row keys isolate changes; unrelated media histories stay valid.
+                self._state_signature = None
                 return dict(ok=True, code='folder_saved', revision=state['revision'], folder_id=row['id'])
         except FolderManagerError as exc:
             return dict(ok=False, code=str(exc), revision=revision)

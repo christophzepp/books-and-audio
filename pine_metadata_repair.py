@@ -43,7 +43,8 @@ def api_source(bridge, mapping, *, require_guid=False):
     cfg = settings(bridge)
     if mapping.get('_pine_unavailable'):
         raise ValueError('PinePods source identity is unavailable')
-    item = bridge.abs.item(mapping['podcast_id'])
+    reader = getattr(bridge.abs, 'episode_item', None)
+    item = reader(mapping['podcast_id'], mapping['episode_id']) if getattr(bridge.abs, '_observation_only', False) is True and callable(reader) else bridge.abs.item(mapping['podcast_id'])
     episodes = item.get('media', {}).get('episodes')
     if not isinstance(episodes, list):
         raise ValueError('Incomplete Audiobookshelf source inventory')
