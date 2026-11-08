@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import fcntl
 import hashlib
@@ -272,6 +273,27 @@ class Bridge:
             raise RuntimeError('Mehrdeutige gespeicherte Hoerbuch-Zuordnung')
         return mappings
 
+    def invalidate_mapping_observations(self):
+        self._mapping_cycle_cache = None
+
+    def _mapping_observation_index(self):
+        """One validated private inventory for initial reads in this cycle.
+
+        No ordinary method uses this implicitly. Application writes, recovery
+        and local enrollment/revision CAS keep their fresh default readers.
+        """
+        if not getattr(self, '_mapping_cycle_active', False):return None
+        cached = getattr(self, '_mapping_cycle_cache', None)
+        if cached is None:
+            seeds = copy.deepcopy(self._seed_mappings())
+            pauses = self.paused_mappings(seeds)
+            pins = self.native_readalong(seeds)
+            mappings = self._mapping_overrides(seeds)
+            cached = dict(mappings=mappings, by_id={m['abs_id']:m for m in mappings},
+                          pins=pins, pauses=pauses)
+            self._mapping_cycle_cache = cached
+        return cached
+
     def paused_mappings(self, mappings=None):
         """Validate pauses against all reserved identities, including auto-maps.
 
@@ -293,10 +315,27 @@ class Bridge:
                 raise ValueError('paused_mappings braucht einen lesbaren, nicht leeren Pausengrund')
         return dict(pauses)
 
-    def require_active_mapping(self, id):
-        reason = self.paused_mappings().get(id)
+    def require_active_mapping(self, id, *, observe=False):
+        index = self._mapping_observation_index() if observe else None
+        if index is None:
+            reason = self.paused_mappings().get(id)
+        else:
+            # Apply a newly requested pause even within an observational cycle.
+            # Global policy validation remains fresh at every actual write.
+            pauses = self.config.get('paused_mappings', {})
+            if not isinstance(pauses, dict):
+                raise ValueError('paused_mappings muss ein Objekt aus Buch-ID und Pausengrund sein')
+            reason = pauses.get(id)
+            if id in pauses and (not isinstance(reason, str) or not reason.strip()
+                    or len(reason) > 500 or not reason.isprintable()):
+                raise ValueError('paused_mappings braucht einen lesbaren, nicht leeren Pausengrund')
         if reason is not None:
             raise MappingPaused(reason)
+
+    def _native_pin(self, id, *, observe=False):
+        index = self._mapping_observation_index() if observe else None
+        if index is None:return self.native_readalong().get(id)
+        return copy.deepcopy(index['pins'].get(id))
 
     def native_readalong(self, mappings=None):
         """Explicit existing-pair exceptions only; discovery never gets these pins."""
@@ -335,12 +374,17 @@ class Bridge:
                 'title': mapping['title'], 'reason': reason,
                 'pending_operations': count, 'requires_review': count > 0}
 
-    def list_mappings(self):
+    def list_mappings(self, *, observe=False):
         if getattr(self, 'provider', 'bookorbit') == 'bookbridge':
             return list(self.load('_bookbridge_mapping_inventory').get('mappings', []))
+        index = self._mapping_observation_index() if observe else None
+        if index is not None:return copy.deepcopy(index['mappings'])
         mappings = self._seed_mappings()
         self.paused_mappings(mappings)
         self.native_readalong(mappings)
+        return self._mapping_overrides(mappings)
+
+    def _mapping_overrides(self, mappings):
         by_id = {m['abs_id']: m for m in mappings}
         for id, bo_id, base_fp, value in self.db.execute(
                 'SELECT id,bo_id,base_fingerprint,value FROM mapping_revision_overrides'):
@@ -353,7 +397,7 @@ class Bridge:
         return [by_id[m['abs_id']] for m in mappings]
 
     def refresh_mappings(self, apply):
-        mappings = self.list_mappings()
+        mappings = self.list_mappings(observe=True)
         settings = self.config.get('auto_discovery', {})
         if not settings.get('enabled'):
             return mappings, {'enabled': False}
@@ -416,6 +460,7 @@ class Bridge:
                     self.db.execute('INSERT OR IGNORE INTO notifications VALUES (?,?)',
                                     (digest(['discovery', issue['key'], issue['reason']]), message))
             self.db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('_discovery', dump(state)))
+        if new:self.invalidate_mapping_observations()
         self._new_native_pairs = set(result.get('native_readalongs', {})) if result['scan_ok'] else set()
         return mappings, summary
 
@@ -426,11 +471,11 @@ class Bridge:
 
     def _read_mapping(self, expected, *, observe=False, logical_only=False):
         with self.observation('abs','bo') if observe else self.observation():
-            return self._read_mapping_current(expected,logical_only=logical_only)
+            return self._read_mapping_current(expected,logical_only=logical_only,observe=observe)
 
-    def _read_mapping_current(self, expected, *, logical_only=False):
-        self.require_active_mapping(expected['abs_id'])
-        pin = self.native_readalong().get(expected['abs_id'])
+    def _read_mapping_current(self, expected, *, logical_only=False, observe=False):
+        self.require_active_mapping(expected['abs_id'],observe=observe)
+        pin = self._native_pin(expected['abs_id'],observe=observe)
         ai = self.abs.item(expected['abs_id'])
         bd = self.bo.detail(expected['bo_id'])
         bm = self.bo.manifest(expected['bo_id'])
@@ -462,11 +507,14 @@ class Bridge:
     def prepare_native_readalong(self, expected, apply):
         enabled, stable = native_discovery.settings(self.config)
         id = expected['abs_id']
-        if not enabled or id in self.native_readalong():
+        if not enabled:return
+        recovering = self.has_pending_transfer(id)
+        if self._native_pin(id,observe=not recovering) is not None:
             return
-        self.require_active_mapping(id)
+        self.require_active_mapping(id,observe=not recovering)
+        if recovering:self.require_current_mapping(expected)
         try:
-            with self.observation('abs','bo'):
+            with self.observation('abs','bo') if not recovering else self.observation():
                 ai = self.abs.item(id)
                 bd = self.bo.detail(expected['bo_id'])
             if not self._has_native_candidate(bd):
@@ -477,7 +525,6 @@ class Bridge:
             bm = self.bo.manifest(expected['bo_id'])
             accepted = self.db.execute('SELECT bo_id,proof FROM native_readalong_enrollments WHERE id=?', (id,)).fetchone()
             pending_witness = self.db.execute('SELECT bo_id,proof FROM native_readalong_witnesses WHERE id=?', (id,)).fetchone()
-            recovering = self.has_pending_transfer(id)
             witness = accepted if recovering else pending_witness or accepted
             trusted = json.loads(witness[1]) if witness and witness[0] == expected['bo_id'] else None
             proof, _ = native_discovery.collect(self.bo, expected, ai, bd, bm, trusted=trusted,
@@ -532,6 +579,7 @@ class Bridge:
                 self.db.execute('DELETE FROM native_readalong_witnesses WHERE id=?', (id,))
                 self.db.execute('INSERT INTO events(at,book,kind,detail) VALUES (?,?,?,?)',
                                 (now(), id, 'native_readalong_enrolled', dump({'proof': proof, 'progress_unchanged': True})))
+            self.invalidate_mapping_observations()
             # A separate cycle performs ordinary conflict/settling checks. Enrollment
             # never creates a baseline, replay, initialization or progress write.
             raise native_discovery.NativeEnrollmentPending('Native read-along enrolled; progress remains unchanged')
@@ -571,12 +619,21 @@ class Bridge:
         return {'abs': a, 'bo': b}, raw
 
     def read_pair(self, expected):
+        self.require_current_mapping(expected)
         m, bd = self._read_mapping(expected,logical_only=True)
         if m['fingerprint'] != expected['fingerprint']:
             raise RuntimeError('Dateizuordnung oder Manifest hat sich geaendert')
         if 'bo_assets' in expected or 'bo_chapters' in expected:
             reconcile_manifest_revision(expected, m)
         return self._read_progress(expected, bd)
+
+    def require_current_mapping(self, expected):
+        """Fresh original mapping CAS; never accepts the cycle's private view."""
+        current = next((m for m in self.list_mappings() if m['abs_id'] == expected['abs_id']), None)
+        if (current is None or current['bo_id'] != expected['bo_id']
+                or current['fingerprint'] != expected['fingerprint']
+                or mapping_identity_fingerprint(current) != mapping_identity_fingerprint(expected)):
+            raise RuntimeError('Gespeicherte Dateizuordnung wurde waehrend des Abgleichs geaendert')
 
     @staticmethod
     def _revision_state(stored, previous, updated):
@@ -721,17 +778,19 @@ class Bridge:
                       'new_fingerprint': updated['fingerprint'], 'progress_unchanged': True}
             self.db.execute('INSERT INTO events(at,book,kind,detail) VALUES (?,?,?,?)',
                             (now(), id, 'manifest_revision_updated', dump(detail)))
+        self.invalidate_mapping_observations()
 
     def prepare_pair(self, expected, stored, apply):
         # Preview evidence is local to this call, never persisted or trusted
         # from a configuration/previous mapping supplied to the apply path.
         expected = {key: value for key, value in expected.items() if key != '_jellyfin_revision_preview'}
-        current, detail = self._read_mapping(expected, observe=True,
-            logical_only=self.has_pending_transfer(expected['abs_id']))
+        recovering = self.has_pending_transfer(expected['abs_id'])
+        if recovering:self.require_current_mapping(expected)
+        current, detail = self._read_mapping(expected, observe=not recovering,logical_only=recovering)
         if current['fingerprint'] == expected['fingerprint']:
             if 'bo_assets' in expected or 'bo_chapters' in expected:
                 reconcile_manifest_revision(expected, current)
-            with self.observation('abs','bo'):
+            with self.observation('abs','bo') if not recovering else self.observation():
                 pair, raw = self._read_progress(expected, detail)
             expected = self._refresh_jellyfin_revision(expected, stored, apply)
             return expected, stored, pair, raw, False
@@ -781,6 +840,7 @@ class Bridge:
         batch=getattr(self,'_book_observations',None)
         if batch is not None:batch.invalidate()
         self.require_active_mapping(id)
+        self.require_current_mapping(mapping)
         self.native_readalong()
         native_discovery.settings(self.config)
         self.verify_transfer_media(mapping)
@@ -834,6 +894,7 @@ class Bridge:
             self.write_record(oid,id,record)
             # Last gate immediately before remote I/O, also after journalling.
             self.require_active_mapping(id)
+            self.require_current_mapping(mapping)
             fn(current_raw)
             current,latest=self.read_pair(mapping)
             if not equal(current[source],goal):
@@ -880,14 +941,21 @@ class Bridge:
         return final
 
     def cycle(self, apply=False, settle=30):
+        self._mapping_cycle_active = True
+        self.invalidate_mapping_observations()
+        try:return self._cycle(apply, settle)
+        finally:
+            self._mapping_cycle_active = False
+            self.invalidate_mapping_observations()
+
+    def _cycle(self, apply=False, settle=30):
         from observation_snapshot import ObservationBatch
         self._book_observations=ObservationBatch(self)
         if getattr(self, 'provider', 'bookorbit') == 'bookbridge':
             from provider_runtime import BookBridgeCoordinator
             return BookBridgeCoordinator(self).cycle(apply, settle)
         # Invalid/unknown pause entries fail before any application API call.
-        self.paused_mappings()
-        self.native_readalong()
+        self._mapping_observation_index()
         native_discovery.settings(self.config)
         self.guard()
         if apply:self.save('_global_error',{})
@@ -907,7 +975,7 @@ class Bridge:
             if getattr(self,"serve_preview",None):self.serve_preview()
             id=mapping['abs_id']; stored=self.load(id)
             try:
-                self.require_active_mapping(id)
+                self.require_active_mapping(id,observe=True)
                 if id in self._new_native_pairs:
                     raise native_discovery.NativeEnrollmentPending('New native audio pair registered; progress remains unchanged')
                 self.prepare_native_readalong(mapping, apply)

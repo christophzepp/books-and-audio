@@ -360,6 +360,9 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             if set(payload) != {"kind", "payload"} or payload["kind"] not in KINDS or not isinstance(payload["payload"], dict):
                 raise WebError(400, "Dieser Auftrag ist nicht gültig.")
             data = payload["payload"]
+            if payload["kind"] == "ebook.retry" and (set(data) not in (set(), {"file_id"})
+                    or "file_id" in data and (type(data["file_id"]) is not int or data["file_id"] <= 0)):
+                raise WebError(400, "Bitte eine gültige E-Book-Datei auswählen.")
             if payload["kind"] == "events.clear" and (set(data) != {"confirm"} or data["confirm"] is not True):
                 raise WebError(400, "Bitte bestätige das Leeren des gesamten Protokolls.")
             if payload["kind"].startswith(("connection.", "folder.", "provider.")) and (type(data.get("expected_revision")) is not int or data["expected_revision"] < 0):

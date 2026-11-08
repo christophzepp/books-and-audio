@@ -1,6 +1,6 @@
 # Books & Audio
 
-**Öffentliche Beta · v0.1.0-beta.12**
+**Öffentliche Beta · v0.1.0-beta.13**
 
 Unter **Podcasts → Einstellungen → Primäre Podcastquelle** kannst du PinePods, Audiobookshelf oder Jellyfin bevorzugen. Bei widersprüchlichen Anfangsständen oder gleichzeitig geänderten Hörständen wird der vorhandene, geänderte Stand dieser Quelle übernommen. Eindeutige neue Änderungen anderer Apps werden weiterhin synchronisiert. Ohne Auswahl bleibt die bisherige Konfliktprüfung aktiv; ein Update aktiviert keine Bevorzugung. Die Einstellung synchronisiert keine Abonnements und ersetzt keine eindeutige Folgenzuordnung. BookOrbit-Podcasts bleiben vorbereitet und inaktiv.
 
@@ -60,6 +60,10 @@ Die Tests verwenden synthetische Bibliotheken und simulierte Dienstantworten. F�
 Ab Beta 12 verwenden auch tatsächliche Fortschrittsübertragungen bereits bestätigte Mediennachweise und EPUB-Positionsindizes auf der NVMe. Eine reine Änderung von Hör- oder Lesestand öffnet unveränderte Mediendateien nicht erneut. Aktuelle Konten, API-Dateiversionen, Mountzuordnungen und Fortschritte werden weiterhin geprüft; konkurrierende Änderungen und unklare Übertragungen bleiben geschützt. Neue oder laut API geänderte Medien werden gezielt geprüft; manuelle Dateiprüfungen lesen weiterhin die Originaldatei.
 
 Die gespeicherten Nachweise haben keine zeitliche Ablaufgrenze. Ein außerhalb der Mediendienste vorgenommener Dateiaustausch ohne Änderung der API-Metadaten wird erst bei einer ausdrücklichen oder optional zeitgesteuerten Dateiprüfung erkannt. Details, Speichergrenzen und Messung: [Fortschrittsübertragungen ab Beta 12](BETRIEB.md#fortschrittsübertragungen-ab-beta-12).
+
+Ab Beta 13 werden auch eindeutig abgelehnte EPUB-Importe dauerhaft auf der NVMe gemerkt. Eine unveränderte, nicht unterstützte Ausgabe wird nicht regelmäßig neu geöffnet. Eine geänderte API-Dateiidentität oder eine ausdrückliche Prüfung in **Bücher → Offene E-Book-Importe** ermöglicht einen neuen Versuch. Vorübergehende Ausfälle erhalten stattdessen wachsende Wartezeiten; die Oberfläche zeigt den frühesten nächsten Versuch an. Ein Retry verändert keine bestehenden Hörstände oder Freigaben.
+
+Buchzuordnungen werden für die ersten Beobachtungen eines Durchlaufs einmal eingelesen. Podcaständerungen entwerten gezielt die betroffenen Beobachtungen, statt alle Kataloge erneut zu laden; große Kataloge werden seltener vollständig kopiert. Auch die begrenzten NVMe-Caches werden bei normalen Schreibvorgängen ohne erneuten vollständigen Verzeichnisdurchlauf verwaltet. Aktuelle Schreibprüfungen und Rücklesekontrollen bleiben erhalten. Details und Einstellungen: [Importprüfungen und größere Bestände ab Beta 13](BETRIEB.md#importprüfungen-und-größere-bestände-ab-beta-13).
 
 ### Podcast-Tracking mit originalem Floppy
 

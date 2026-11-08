@@ -4,6 +4,7 @@ from contextlib import closing
 import copy
 import hashlib
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -629,6 +630,22 @@ class Administration:
             elif kind.startswith('provider.'):
                 result = self.manager.provider(payload, self.provider_check, apply=kind == 'provider.activate')
                 self.store.finish(ident, result=result, error=None if result.get('ok') else connection_error(result.get('code')))
+            elif kind == 'ebook.retry':
+                if (set(payload) not in (set(), {'file_id'}) or 'file_id' in payload
+                        and (type(payload['file_id']) is not int or payload['file_id'] <= 0)):
+                    raise ValueError('Invalid ebook retry selection')
+                if bridge is None or bridge.config.get('mapping_provider') == 'bookbridge':
+                    raise ValueError('Ebook discovery is unavailable')
+                spec=bridge.config.get('jellyfin',{}).get('auto_ebooks',{})
+                if spec.get('enabled') is not True:raise ValueError('Ebook discovery is unavailable')
+                import ebook_discovery
+                # This command only checks/registers unassigned files. It never
+                # executes a progress coordinator or changes the global pause.
+                _,report=ebook_discovery.refresh(bridge,True,force=True,
+                    retry_file_ids=[payload['file_id']] if 'file_id' in payload else None)
+                self.store.finish(ident,result={'added':report.get('added',0),
+                    'waiting':report.get('waiting',0),'blocked':len(report.get('blocked',[])),
+                    'message':'Die Importprüfung ist abgeschlossen. Den aktuellen Stand findest du unter Bücher.'})
             elif kind == 'events.clear':
                 if set(payload) != {'confirm'} or payload['confirm'] is not True:
                     raise ValueError('Das Leeren des Protokolls muss bestätigt werden.')
@@ -705,6 +722,8 @@ class Administration:
             except Exception:
                 issues.append({'title': 'Zuordnungen', 'reason': 'Gespeicherte Zuordnungen konnten nicht vollständig gelesen werden'})
         ebooks = last.get('ebooks', {})
+        try: import_report=(bridge.load('_ebook_discovery').get('report') or ebooks.get('discovery',{})) if bridge else ebooks.get('discovery',{})
+        except Exception:import_report={}
         for item in ebooks.get('blocked', []): issues.append(dict(item, type='ebook'))
         fatal = last.get('fatal')
         podcast_bad = podcasts['enabled'] and (not podcasts.get('at') or podcasts.get('blocked') or podcasts.get('fatal'))
@@ -714,10 +733,36 @@ class Administration:
                 'healthy': not (issues or fatal or disabled_reason or paused or podcast_bad),
                 'podcasts_blocked': len(podcasts.get('blocked', [])) if podcasts['enabled'] else 0},
             'last_run': last, 'podcasts': podcasts, 'admin': {'paused': paused, 'reason': disabled_reason or fatal},
+            'ebook_imports': public_ebook_imports(import_report),
             'io_metrics': {'folders': snapshot(self.folders), 'presentation': snapshot(self), 'media': snapshot(bridge)},
             'worker': {'busy': busy, 'at': stamp()},
             'services': {}}, heartbeat=60)
         self.publish_changed('connections-public.json', self.manager.public())
+
+
+def public_ebook_imports(report):
+    """Only fixed diagnostics and IDs, never raw API errors or source URLs."""
+    labels={
+        'epub_content_rejected':'Diese EPUB-Ausgabe kann nicht automatisch übernommen werden.',
+        'source_unavailable':'Die Datei oder ihr Dienst ist vorübergehend nicht verfügbar.',
+        'file_unavailable':'Die Datei ist noch nicht für die Prüfung verfügbar.',
+        'inventory_unavailable':'Die Bibliotheksabfrage konnte nicht abgeschlossen werden.',
+    }
+    if not isinstance(report,dict):return {'enabled':False,'blocked':[]}
+    rows=[]
+    failures=report.get('blocked',[])
+    for row in failures if isinstance(failures,list) else []:
+        if not isinstance(row,dict):continue
+        title=row.get('title')
+        value={'title':title[:500] if isinstance(title,str) else 'E-Book-Import',
+               'reason':labels.get(row.get('code'),'Die automatische Importprüfung benötigt einen erneuten Versuch.'),
+               'retry_mode':'manual_or_source_change' if row.get('retry_mode')=='manual_or_source_change' else 'backoff'}
+        for key in ('file_id','book_id'):
+            if type(row.get(key)) is int and row[key]>0:value[key]=row[key]
+        when=row.get('retry_at')
+        if type(when) in (int,float) and math.isfinite(when) and when>=0:value['retry_at']=when
+        rows.append(value)
+    return {'enabled':report.get('enabled') is True,'blocked':rows}
 
 
 def connection_error(code):

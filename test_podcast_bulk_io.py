@@ -267,24 +267,24 @@ class CoordinatorFixture(unittest.TestCase):
         snapshot._request('GET','/example','example')
         return client,snapshot
 
-    def assert_invalidated(self,c,client,old):
+    def assert_unrelated_preserved(self,c,client,old):
         fresh=c.observation.client(client)
-        self.assertIsNot(fresh,old)
+        self.assertIs(fresh,old)
         fresh._request('GET','/example','example')
-        self.assertEqual(client._request.call_count,2)
+        self.assertEqual(client._request.call_count,1)
 
 
 class MutationInvalidation(CoordinatorFixture):
-    def test_new_admission_discards_snapshot_but_unchanged_enrollment_reuses_it(self):
+    def test_new_admission_and_unchanged_enrollment_preserve_unrelated_snapshots(self):
         c,mapping=self.coordinator();client,old=self.prime(c)
         self.assertEqual(c.handle(mapping,True,0)[0],'unchanged')
-        self.assert_invalidated(c,client,old)
+        self.assert_unrelated_preserved(c,client,old)
         current=c.observation.client(client)
         for _ in range(10):self.assertEqual(c.handle(mapping,True,0)[0],'unchanged')
         self.assertIs(c.observation.client(client),current)
-        self.assertEqual(client._request.call_count,2)
+        self.assertEqual(client._request.call_count,1)
 
-    def test_position_transfer_both_directions_discards_cycle_snapshot(self):
+    def test_position_transfer_both_directions_preserves_unrelated_snapshot(self):
         c,mapping=self.coordinator();c.handle(mapping,True,0)
         for direction in ('jf','abs'):
             with self.subTest(direction=direction):
@@ -292,13 +292,13 @@ class MutationInvalidation(CoordinatorFixture):
                 else:self.jf.set(70)
                 client,old=self.prime(c)
                 self.assertEqual(c.handle(mapping,True,0)[0],'synced')
-                self.assert_invalidated(c,client,old)
+                self.assert_unrelated_preserved(c,client,old)
 
-    def test_lost_write_response_discards_snapshot_and_retains_pending_journal(self):
+    def test_lost_write_response_preserves_unrelated_snapshot_and_pending_journal(self):
         c,mapping=self.coordinator();c.handle(mapping,True,0)
         self.abs.set(25);self.jf.fail=True;client,old=self.prime(c)
         with self.assertRaisesRegex(RuntimeError,'Lost JF response'):c.handle(mapping,True,0)
-        self.assert_invalidated(c,client,old)
+        self.assert_unrelated_preserved(c,client,old)
         self.assertIn('pending',self.load(mapping['id']))
 
     def test_pending_core_initial_observation_uses_live_clients(self):
@@ -339,10 +339,10 @@ class MutationInvalidation(CoordinatorFixture):
 class StatusMutationInvalidation(CoordinatorFixture):
     setup_variant=status_fixture.StatusTests.setup_variant
 
-    def test_status_admission_and_unchanged_rows_have_separate_invalidation_behavior(self):
+    def test_status_admission_and_unchanged_rows_preserve_unrelated_snapshots(self):
         self.setup_variant();c,mapping=self.coordinator();client,old=self.prime(c)
         self.assertEqual(c.handle(mapping,True,0)[0],'unchanged')
-        self.assert_invalidated(c,client,old)
+        self.assert_unrelated_preserved(c,client,old)
         current=c.observation.client(client)
         for _ in range(3):self.assertEqual(c.handle(mapping,True,0)[0],'unchanged')
         self.assertIs(c.observation.client(client),current)
@@ -357,15 +357,15 @@ class StatusMutationInvalidation(CoordinatorFixture):
         with patch.object(c,'observing',side_effect=AssertionError('pending status read entered snapshot')):
             StatusCoordinator(c).handle(mapping,True,0)
 
-    def test_status_write_discards_snapshot_on_success_and_lost_acknowledgement(self):
+    def test_status_write_preserves_unrelated_snapshot_on_success_and_lost_acknowledgement(self):
         from podcast_status_sync import state_key
         self.setup_variant();c,mapping=self.coordinator();c.handle(mapping,True,0)
         self.pine.set(80,'finished');client,old=self.prime(c)
         self.assertEqual(c.handle(mapping,True,0)[0],'synced')
-        self.assert_invalidated(c,client,old)
+        self.assert_unrelated_preserved(c,client,old)
         self.pine.set(0,'not_started');self.abs.fail=True;client,old=self.prime(c)
         with self.assertRaisesRegex(RuntimeError,'Lost ABS response'):c.handle(mapping,True,0)
-        self.assert_invalidated(c,client,old)
+        self.assert_unrelated_preserved(c,client,old)
         self.assertTrue(self.load(state_key(mapping['id'])).get('pending'))
 
 

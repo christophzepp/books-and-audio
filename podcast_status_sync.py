@@ -323,7 +323,7 @@ class StatusCoordinator:
                 self.baseline(key,binding,states,raw,proof)
                 if not stored.get('enrolled'):
                     invalidate=getattr(self.c,'invalidate_observations',None)
-                    if callable(invalidate):invalidate()
+                    if callable(invalidate):invalidate(mapping)
                 self.mark(mapping,status='enrolled')
             return 'unchanged',states
         if not apply:return 'proposed',states
@@ -503,7 +503,7 @@ class StatusCoordinator:
                         step['value']['_server_timestamp']=action_epoch(receipt['timestamp']);checkpoint('sending')
             finally:
                 invalidate=getattr(self.c,'invalidate_observations',None)
-                if callable(invalidate):invalidate()
+                if callable(invalidate):invalidate(mapping,services=(step['service'],))
             current,fresh_raw=self.read(mapping,proof)
             if not self.confirmed(step,fresh_raw,raw,proof):raise StatusConflict('variant_pending_review')
             states,raw=current,fresh_raw;advance();checkpoint('verified')

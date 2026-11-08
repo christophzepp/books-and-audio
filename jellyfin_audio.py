@@ -200,10 +200,11 @@ class AudioCoordinator:
             latest = raw
             def abs_step(label, fn):
                 nonlocal latest
+                checkpoint('sending_abs_'+label)
                 b.guard(); jf_unchanged()
                 _, current = b.read_pair(mapping)
                 if encode(current) != encode(latest): raise RuntimeError('Concurrent ABS/BookOrbit edit')
-                checkpoint('sending_abs_'+label); fn()
+                fn()
                 _, latest = b.read_pair(mapping)
                 if latest['bo'] != raw['bo'] or latest['bo_status'] != raw['bo_status']: raise RuntimeError('Concurrent BookOrbit edit')
             if pair['abs']['status']=='finished' and goal['status']!='finished':
@@ -228,10 +229,10 @@ class AudioCoordinator:
         for i,(before,after) in enumerate(zip(rows,target)):
             changes={k:v for k,v in after.items() if v!=before.get(k) and v is not None}
             if not changes: continue
+            checkpoint('sending_jellyfin_'+str(i))
             b.guard(); jf_unchanged()
             _, fresh=b.read_pair(mapping)
             if encode(fresh)!=encode(raw): raise RuntimeError('Concurrent source edit')
-            checkpoint('sending_jellyfin_'+str(i))
             self.jf.update(tracks[i]['id'],changes)
             updated=self.read(tracks)
             expected=copy.deepcopy(rows); expected[i].update(changes)

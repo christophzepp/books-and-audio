@@ -43,12 +43,12 @@ class DiscoveryTests(EbookTests):
     def test_duplicate_jellyfin_path_blocked(self):
         self.jitems += [dict(self.jitems[0], Id='b'*32)]
         new, obs, r = self.discover()
-        self.assertFalse(new or obs); self.assertIn('Ambiguous',r['blocked'][0]['reason'])
+        self.assertFalse(new); self.assertEqual(obs['1']['outcome'],'retry'); self.assertIn('Ambiguous',r['blocked'][0]['reason'])
 
     def test_duplicate_bookorbit_path_blocked(self):
         self.cards.append(dict(id=2, libraryId=2))
         new, obs, r = self.discover()
-        self.assertFalse(new or obs); self.assertEqual(len(r['blocked']), 2)
+        self.assertFalse(new); self.assertEqual(obs['1']['outcome'],'retry'); self.assertEqual(len(r['blocked']), 2)
 
     def test_readalong_filename_and_mixed_book_excluded(self):
         self.files[0]['absolutePath']='/books/test.readalong.epub'
@@ -107,7 +107,7 @@ class DiscoveryTests(EbookTests):
             return index
         with patch('ebook_discovery.inspect_epub', side_effect=change):
             additions, observed, report = self.discover(obs, 1061)
-        self.assertFalse(additions or observed)
+        self.assertFalse(additions);self.assertEqual(observed['1']['outcome'],'retry')
         self.assertIn('changed during validation', report['blocked'][0]['reason'])
 
     def test_no_new_api_candidates_does_not_request_physical_folder_guard(self):
@@ -150,11 +150,12 @@ class DiscoveryTests(EbookTests):
             event=lambda *x:events.append(x),alert=lambda *x:events.append(x))
         self.assertEqual(refresh(b,False)[0],[]);self.assertEqual(store,{})
         self.assertEqual(refresh(b,True)[0],[])
+        observed=copy.deepcopy(store['_ebook_discovery']['observations'])
         clock[0]+=301
         oldquery=self.bo.query
         self.bo.query=lambda:(_ for _ in ()).throw(RuntimeError('Incomplete inventory'))
         self.assertEqual(refresh(b,True)[0],[])
-        self.assertEqual(store['_ebook_discovery']['observations'],{})
+        self.assertEqual(store['_ebook_discovery']['observations'],observed)
         self.bo.query=oldquery
         self.assertEqual(refresh(b,True)[0],[])
         clock[0]+=301

@@ -9,8 +9,8 @@ import json
 import os
 from pathlib import Path
 import stat
-import tempfile
 
+from cache_maintenance import mutation
 from epub_locations import EpubLocations
 from io_metrics import increment
 
@@ -118,27 +118,21 @@ class EpubIndexCache:
         raw=self._encode(dict(version=EpubLocations.CACHE_VERSION,sha256=sha,data=data,
                               data_sha256=hashlib.sha256(self._encode(data)).hexdigest()))
         if len(raw)>min(MAX_INDEX_BYTES,self.max_bytes):return
-        temporary=None
+        temporary=None;descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|getattr(os,'O_NOFOLLOW',0))
         try:
-            with tempfile.NamedTemporaryFile(dir=directory,prefix='.index-',delete=False) as target:
-                temporary=Path(target.name)
-                os.fchmod(target.fileno(),0o600)
-                target.write(raw);target.flush();os.fsync(target.fileno())
-            os.replace(temporary,directory/(key+'.json'))
-            temporary=None
+            with mutation(descriptor,max_bytes=self.max_bytes,max_entries=self.max_entries) as catalog:
+                temporary='.index-'+os.urandom(16).hex()
+                fd=os.open(temporary,os.O_CREAT|os.O_EXCL|os.O_WRONLY|getattr(os,'O_NOFOLLOW',0),0o600,dir_fd=descriptor)
+                with os.fdopen(fd,'wb') as target:
+                    target.write(raw);target.flush();os.fsync(target.fileno())
+                os.replace(temporary,key+'.json',src_dir_fd=descriptor,dst_dir_fd=descriptor)
+                temporary=None
+                catalog.record(key+'.json');catalog.prune(key+'.json')
         finally:
-            if temporary is not None:temporary.unlink(missing_ok=True)
-        # Only our fixed-name regular files are eligible for eviction.
-        entries=[]
-        for item in directory.glob('*.json'):
-            if len(item.stem)!=64 or any(x not in '0123456789abcdef' for x in item.stem):continue
-            info=item.lstat()
-            if stat.S_ISREG(info.st_mode):entries.append((info.st_mtime_ns,info.st_size,item))
-        entries.sort(reverse=True)
-        used=0
-        for number,(_,size,item) in enumerate(entries):
-            used+=size
-            if number>=self.max_entries or used>self.max_bytes:item.unlink(missing_ok=True)
+            if temporary is not None:
+                try:os.unlink(temporary,dir_fd=descriptor)
+                except FileNotFoundError:pass
+            os.close(descriptor)
 
     def cached(self, expected_hash):
         """Load only validated SSD data, without inspecting any media path.
@@ -164,10 +158,18 @@ class EpubIndexCache:
         """Revoke derived evidence after a failed explicit physical check."""
         key=self._key(expected_hash)
         self.memory.pop(key,None)
+        descriptor=None
         try:
             directory=self._directory()
-            if directory is not None:(directory/(key+'.json')).unlink(missing_ok=True)
+            if directory is not None:
+                descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|getattr(os,'O_NOFOLLOW',0))
+                with mutation(descriptor,max_bytes=self.max_bytes,max_entries=self.max_entries) as catalog:
+                    try:os.unlink(key+'.json',dir_fd=descriptor)
+                    except FileNotFoundError:return
+                    catalog.discard(key+'.json')
         except (OSError,ValueError):pass
+        finally:
+            if descriptor is not None:os.close(descriptor)
 
     def get(self, path, expected_hash, expected_size):
         """Explicit physical validation; even a RAM hit hashes the original."""

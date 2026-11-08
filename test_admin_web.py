@@ -143,6 +143,16 @@ class WebTests(unittest.TestCase):
         cases=[{'kind':'unknown','payload':{}},{'kind':'connection.update','payload':{}},{'kind':'connection.update','payload':{'expected_revision':True}},{'kind':'review.approve','payload':{'review_id':ID,'digest':'a'*64,'confirm':False}},{'kind':'review.approve','payload':{'review_id':ID,'digest':'wrong','confirm':True}}]
         for body in cases: self.assertEqual(self.request('POST','/api/commands',body)[0],400)
         self.assertEqual(self.request('POST','/api/commands',{'kind':'review.approve','payload':{'review_id':ID,'digest':'a'*64,'confirm':True}})[0],202)
+    def test_ebook_retry_uses_existing_auth_csrf_and_strict_target_schema(self):
+        self.bootstrap()
+        command={'kind':'ebook.retry','payload':{'file_id':7}}
+        self.assertEqual(self.request('POST','/api/commands',command,csrf=False)[0],403)
+        self.assertEqual(self.request('POST','/api/commands',command,origin=False)[0],403)
+        self.assertEqual(self.request('POST','/api/commands',command)[0],202)
+        self.assertEqual(self.request('POST','/api/commands',{'kind':'ebook.retry','payload':{}})[0],202)
+        for value in (True,0,-1,'7',None):
+            self.assertEqual(self.request('POST','/api/commands',{'kind':'ebook.retry','payload':{'file_id':value}})[0],400)
+        self.assertEqual(self.request('POST','/api/commands',{'kind':'ebook.retry','payload':{'path':'/untrusted'}})[0],400)
     def test_static_csp_nosniff_and_no_store(self):
         for path in ['/','/app.js','/style.css']:
             code,_,headers=self.request('GET',path); self.assertEqual(code,200); headers=dict(headers)

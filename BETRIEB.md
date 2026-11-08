@@ -42,6 +42,8 @@ Optionale Einstellungen im bestehenden `config/config.json` (nur den Abschnitt e
   "ebook_verify_interval_seconds": 0,
   "ebook_discovery_interval_seconds": 300,
   "ebook_candidate_stable_seconds": 60,
+  "ebook_retry_initial_seconds": 300,
+  "ebook_retry_max_seconds": 86400,
   "folder_validation_interval_seconds": 0,
   "integrity_window_utc": null
 }
@@ -65,7 +67,7 @@ Unveränderte positive Nachweise haben **keine zeitliche Ablaufgrenze**. Sie üb
 
 `folder_validation_interval_seconds: 0` und `ebook_verify_interval_seconds: 0` deaktivieren zusätzliche regelmäßige physische Prüfungen. Bereits ausdrücklich konfigurierte positive Intervalle bleiben erhalten; für dauerhafte Wiederverwendung diese Werte auf `0` setzen. Manuelle Prüfungen lesen weiterhin die Originaldatei. Fortschrittsübertragungen prüfen seit Beta 12 aktuelle APIs gegen die historischen Mediennachweise. Wird eine Datei außerhalb der Mediendienste bei unveränderten API-Daten ersetzt, erkennt der Dienst dies erst bei einer manuellen oder zusätzlichen Integritätsprüfung. Historische Nachweise allein erteilen keine Schreibberechtigung; aktuelle Konten, Dateiversionen und Konfliktprüfungen müssen weiterhin passen.
 
-Pro Durchlauf werden schreibgeschützte API-Sammelabfragen und Indizes aufgebaut. ABS liefert persönliche Hörstände einmal und jede Podcastserie einmal; PinePods liefert seine paginierten persönlichen Kataloge und GPodder-Aktionen je Feed; Jellyfin liefert den betreffenden Bibliotheksbestand. PinePods-Sammelmetadaten werden je Feed gegen eine vollständige native Antwort abgeglichen. Abweichende Formate verwenden einzelne geprüfte Abfragen. Neue Durchläufe lesen neue Hörstände, sodass Zurücksetzen und Weiterhören erkennbar bleiben. Nach Schreibvorgängen werden die Beobachtungssnapshots verworfen. Frische Kontoprüfung, CAS, Übertragungsrücklesen und Wiederaufnahme verwenden die Originalclients.
+Pro Durchlauf werden schreibgeschützte API-Sammelabfragen und Indizes aufgebaut. ABS liefert persönliche Hörstände einmal und jede Podcastserie einmal; PinePods liefert seine paginierten persönlichen Kataloge und GPodder-Aktionen je Feed; Jellyfin liefert den betreffenden Bibliotheksbestand. PinePods-Sammelmetadaten werden je Feed gegen eine vollständige native Antwort abgeglichen. Abweichende Formate verwenden einzelne geprüfte Abfragen. Neue Durchläufe lesen neue Hörstände, sodass Zurücksetzen und Weiterhören erkennbar bleiben. Seit Beta 13 entwerten Schreibvorgänge gezielt die betroffenen Teilnehmer und Folgen; unabhängige Katalogdaten bleiben im laufenden Beobachtungsdurchlauf erhalten. Frische Kontoprüfung, CAS, Übertragungsrücklesen und Wiederaufnahme verwenden die Originalclients.
 
 Unter `io_metrics` stehen unter anderem `api_observation_requests`, `api_observation_cache_hits`, `api_observation_index_hits` und `native_observation_durable_hits`; unter `io_metrics.media` stehen `podcast_variant_source_checks`, `podcast_variant_source_cache_hits` und `podcast_variant_source_disk_hits`. Zähler starten beim Worker-Neustart neu. Nach einem ersten Prüf-/Migrationsdurchlauf mindestens mehrere unveränderte Zyklen und mehr als 15 Minuten beobachten; zusätzlich einen Worker-Neustart prüfen. Diese Programmzähler und Pfad-Syscalls unterscheiden sich von physischen Plattenzugriffen. Andere Mediendienste können die HDD weiterhin aufwecken.
 
@@ -89,4 +91,26 @@ Regressionen mit echten Koordinatoren und simulierten APIs verbieten Medienzugri
 
 ```sh
 python -m unittest test_podcast_transfer_io test_ebook_progress_standby test_audio_transfer_standby test_media_io_integration test_folder_transfer_io test_admin_media_guard test_epub_index_capacity
+```
+
+## Importprüfungen und größere Bestände ab Beta 13
+
+Die automatische EPUB-Erkennung unterscheidet dauerhaft abgelehnte Inhalte von vorübergehenden Ausfällen. Kann eine stabile, eindeutig zugeordnete Datei inhaltlich nicht übernommen werden, bleibt der negative Prüfnachweis im privaten Zustand auf der NVMe erhalten, auch nach einem Neustart. Solange die aktuellen API-Dateiidentitäten, das Konto und die betreffende Mountzuordnung passen, wird diese Datei nicht erneut geöffnet oder indiziert. Eine fehlende aktuelle Konto- oder Mountbestätigung wird dadurch nicht übergangen. Änderungen an einer anderen Ausgabe entwerten ihren Nachweis nicht.
+
+Eine Änderung der gebundenen Quell- oder Dateiversion laut API löst eine gezielte neue Prüfung aus. Die API-Bestandsabfrage bleibt regelmäßig; `ebook_discovery_interval_seconds` ist keine Ablaufzeit für die Inhaltsprüfung einer unveränderten, abgelehnten EPUB. Es gibt damit keine neue regelmäßige Vollprüfung des Medienbestands. Auch negative Nachweise können einen Dateiaustausch außerhalb der Mediendienste ohne geänderte API-Metadaten nicht automatisch erkennen.
+
+Unter **Bücher → Offene E-Book-Importe** werden fehlgeschlagene Importe mit ihrem Grund angezeigt. **Diese Datei prüfen** wiederholt die Prüfung einer einzelnen Datei; **Offene Importe erneut prüfen** startet einen ausdrücklichen neuen Versuch für die offenen Kandidaten. Dabei kann die Medienplatte anlaufen. Eine gezielte Prüfung behält die Nachweise, Wartezeiten und sichtbaren Hinweise anderer Kandidaten bei. Mehrdeutige Dateiidentitäten bleiben gesperrt. Bereits vorhandene Zuordnungen, Hör-/Lesestände und Freigaben werden nicht zurückgesetzt.
+
+Netzwerkfehler, vorübergehend fehlende Quellen oder nicht verfügbare Dateien gelten nicht als dauerhafte Inhaltsablehnung. Für sie wächst die Wiederholungswartezeit exponentiell, standardmäßig von **300 Sekunden bis höchstens 86.400 Sekunden**. Ein Neustart setzt diese Wartezeit nicht zurück. `ebook_retry_initial_seconds` erlaubt 30 bis 86.400 Sekunden; `ebook_retry_max_seconds` muss mindestens dem Anfangswert entsprechen und darf höchstens 604.800 Sekunden betragen. Die tatsächliche Ausführung erfolgt frühestens nach der Wartezeit im nächsten passenden Erkennungsdurchlauf. Die GUI zeigt den frühesten nächsten Versuch an und erlaubt einen bewussten Retry. Eine Inhaltsablehnung erhält dagegen keine automatische Wiederholungsfrist.
+
+Für große Buchbestände werden die gespeicherten Zuordnungen, Revisionen und nativen Ausgaben einmal je Durchlauf für die ersten Beobachtungen validiert und indiziert. Vor einer tatsächlichen Übertragung und beim Wiederaufnehmen eines Journals werden weiterhin die aktuellen Originalzuordnungen, Pausen, Freigaben und Fortschritte geprüft. Eine Änderung während des Durchlaufs kann somit keinen veralteten Beobachtungsstand zur Schreibberechtigung machen.
+
+Bei Podcasts bleiben unabhängige Bestandsdaten nach einer Übertragung erhalten. Der geänderte Hörstand wird gezielt entwertet und erneut gelesen, auch nach einer verlorenen Schreibantwort. Frische Prüfungen vor dem Schreiben und Rücklesekontrollen verwenden weiterhin die Originalclients. Interne Indizes vermeiden außerdem wiederholte vollständige Katalogkopien; herausgegebene Datensätze bleiben getrennte Kopien. Die Zahl der API-Abfragen hängt weiterhin von Serien, Katalogseiten, Teilnehmern und tatsächlichen Änderungen ab. Nicht jede Abfrage lässt sich unabhängig von der Bestandsgröße bündeln.
+
+Die Wartung von `state/media-observations` und `state/ebook-index-cache` führt für normale neue Cacheeinträge keinen vollständigen Verzeichnisdurchlauf mehr aus. Eine begrenzte Verwaltung im RAM aktualisiert Größen und Verdrängungsreihenfolge; eine Verzeichnissperre stimmt mehrere schreibende Prozesse ab. Nach Neustarts, geänderten Speichergrenzen oder erkannten externen Verzeichnisänderungen wird diese Verwaltung neu aufgebaut. Cacheleser prüfen weiterhin ihre einzelnen Nachweise. Diese Wartung greift ausschließlich auf den privaten NVMe-Zustand zu, verändert keine Freigaben und verkürzt keine Mediennachweise durch einen Zeitablauf.
+
+Gezielte Regressionen prüfen unter anderem dauerhafte Ablehnungen ohne Medienzugriff, API-Änderungen, gezielte Wiederholungen, Wartezeiten, große Zuordnungsbestände und Änderungen vor dem Schreiben:
+
+```sh
+python -m unittest test_ebook_discovery_standby test_admin_ebook_retry test_io_policy test_mapping_cycle_index test_audio_mapping_cas test_observation_scaling test_cache_maintenance
 ```

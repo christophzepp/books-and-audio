@@ -1,3 +1,15 @@
+## 0.1.0-beta.13 – Unveränderte Importfehler ruhen lassen
+
+- Stabile EPUB-Ausgaben, deren Inhalt nicht automatisch übernommen werden kann, erhalten einen dauerhaften negativen Nachweis auf der NVMe. Unveränderte Ausgaben werden nicht regelmäßig erneut geöffnet. Aktuelle Konto-, Mount- und API-Dateiidentitäten bleiben Voraussetzung; geänderte Quellen entwerten gezielt ihren Nachweis.
+- Unter **Bücher → Offene E-Book-Importe** lassen sich Fehler einsehen und einzelne Dateien oder alle offenen Importe ausdrücklich erneut prüfen. Eine Einzelprüfung behält die Nachweise, Wartezeiten und Hinweise anderer Kandidaten bei. Bestehende Zuordnungen, Fortschritte und Freigaben bleiben erhalten.
+- Vorübergehende Importausfälle verwenden eine über Neustarts erhaltene, exponentiell wachsende Wiederholungswartezeit: standardmäßig 300 bis 86.400 Sekunden. Anfang und Obergrenze sind konfigurierbar; eine dauerhafte Inhaltsablehnung wird nur bei geänderter Quelle oder einer ausdrücklichen Prüfung wiederholt.
+- Buchzuordnungen werden für erste Beobachtungen einmal je Durchlauf validiert und indiziert. Tatsächliche Übertragungen und Journalwiederaufnahme prüfen weiterhin aktuelle Originalzuordnungen, Pausen, Freigaben und Fortschritte. Gleichzeitige Änderungen bleiben durch den aktuellen Vergleich vor Schreibvorgängen geschützt.
+- Podcastübertragungen entwerten die Beobachtungen der betroffenen Folge und Teilnehmer, statt unabhängige Kataloge erneut zu laden. Interne Indizes vermeiden zusätzliche vollständige Katalogkopien. Die benötigten API-Abfragen hängen weiterhin von Serien, Seiten und tatsächlichen Änderungen ab; frische Schreibprüfungen und Rücklesen bleiben erhalten.
+- Die begrenzten NVMe-Caches verwalten neue Einträge mit inkrementeller Größen- und Verdrängungsverwaltung unter einer gemeinsamen Verzeichnissperre. Normale Schreibvorgänge benötigen keinen erneuten vollständigen Cache-Verzeichnisdurchlauf. Nach Neustarts oder erkannten externen Verzeichnisänderungen wird die Verwaltung neu aufgebaut; die Prüfung einzelner Nachweise bleibt erhalten.
+- Es werden keine neuen regelmäßigen Medienvollprüfungen eingeführt. Ein Dateiaustausch außerhalb der Mediendienste bei unveränderten API-Metadaten bleibt bis zu einer ausdrücklichen oder bereits konfigurierten optionalen Integritätsprüfung unbemerkt.
+
+Docker: `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.13` oder `beta`, für Linux AMD64 und ARM64. Verbindungen, Freigaben, Hörstände und Dockge-Mounts bleiben kompatibel. [Einstellungen und Grenzen](BETRIEB.md#importprüfungen-und-größere-bestände-ab-beta-13).
+
 ## 0.1.0-beta.12 – Fortschritte übertragen, Mediennachweise behalten
 
 - Reine Hör- und Lesestandsänderungen verwenden dauerhaft bestätigte NVMe-Nachweise: keine erneute lokale Dateiprüfung, EPUB-Inhaltslesung oder Audio-Laufzeitmessung allein wegen einer Fortschrittsübertragung. Dies gilt für Podcasts, E-Books und native Hörbuch-/Mitlese-Ausgaben.

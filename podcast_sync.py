@@ -399,29 +399,52 @@ class PodcastCoordinator:
         self.variant_checker = None
         self.feed_resolver = None
 
-    def invalidate_observations(self):
-        batch = getattr(self, 'observation', None)
-        if batch is not None:batch.invalidate()
-        self.feed_resolver = None
+    def invalidate_observations(self,mapping=None,services=None,*,metadata=False):
+        """Discard changed target progress while retaining unrelated catalogs."""
+        batch=getattr(self,'observation',None)
+        if batch is None:return
+        if mapping is None:
+            if services is None:batch.invalidate()
+            else:
+                for service in services:
+                    source={'abs':self.b.abs,'jf':self.jf,'pine':self.pine}.get(service)
+                    if source is not None:batch.invalidate(source)
+            self.feed_resolver=None
+            return
+        for service in services or ('abs','jf','pine'):
+            if service in ('pine','pinepods','gpodder') and self.pine is None:continue
+            if service=='abs':
+                batch.invalidate(self.b.abs,item_id=mapping['podcast_id'],episode_id=mapping['episode_id'])
+            elif service=='jf':batch.invalidate(self.jf,jf_ids=[mapping['jf']['id']])
+            elif service in ('pine','pinepods','gpodder') and self.pine is not None:
+                routes=[mapping,mapping.get('_pine_route') or {},mapping.get('_variant_proof') or {}]
+                for feed,enclosure in {(row.get('feed_url'),row.get('enclosure_url')) for row in routes}:
+                    if feed and enclosure:batch.invalidate(self.pine,feed_url=feed,enclosure_url=enclosure)
+                if metadata:self.feed_resolver=None
+            else:batch.invalidate()
 
-    def mutate(self, action, *args, **kwargs):
-        # A lost response may already have changed remote state. Clear the
-        # entire cycle snapshot on success AND failure before another mapping
-        # can observe it; ordinary unchanged episodes keep their shared view.
-        try:return action(*args, **kwargs)
-        finally:self.invalidate_observations()
+    def mutate(self,action,*args,_mapping=None,_services=None,**kwargs):
+        # A lost response may already have changed remote state. Mark its exact
+        # target dirty on success and failure; readback still uses live clients.
+        try:return action(*args,**kwargs)
+        finally:self.invalidate_observations(_mapping,_services)
 
-    def observing(self, *consumers):
-        """Only initial reads use the cycle snapshot; transactions stay fresh."""
-        batch = getattr(self, 'observation', None)
-        if batch is None:
-            return nullcontext()
-        bindings = [(self.b, 'abs'), (self.abs, 'client'), (self, 'jf'), (self, 'pine')]
-        for attr in ('pinepods', 'jellyfin'):
-            if hasattr(self.b, attr):bindings.append((self.b, attr))
+    def _observation_bindings(self,*consumers):
+        bindings=[(self.b,'abs'),(self.abs,'client'),(self,'jf'),(self,'pine')]
+        for attr in ('pinepods','jellyfin'):
+            if hasattr(self.b,attr):bindings.append((self.b,attr))
         for consumer in consumers:
-            if hasattr(consumer, 'pine'):bindings.append((consumer, 'pine'))
-        return batch.scope(*bindings)
+            if hasattr(consumer,'pine'):bindings.append((consumer,'pine'))
+        return bindings
+
+    def observing(self,*consumers):
+        """Only initial reads use the cycle snapshot; transactions stay fresh."""
+        batch=getattr(self,'observation',None)
+        return batch.scope(*self._observation_bindings(*consumers)) if batch is not None else nullcontext()
+
+    def live(self,*consumers):
+        batch=getattr(self,'observation',None)
+        return batch.live(*self._observation_bindings(*consumers)) if batch is not None else nullcontext()
 
     def observe_read(self, mapping):
         from podcast_status_sync import pending
@@ -435,12 +458,11 @@ class PodcastCoordinator:
             return self.read(mapping)
 
     def variant_proof(self, mapping, *, refresh=False, apply=False, force_source=False, authorize=False):
-        batch = getattr(self, 'observation', None)
         if refresh or force_source or authorize:
-            if batch is not None:batch.invalidate()
-            try:return self._variant_proof(mapping, refresh=refresh, apply=apply, force_source=force_source, authorize=authorize)
-            finally:
-                if batch is not None:batch.invalidate()
+            # Live guards do not mutate remote catalogs. Keep their cycle
+            # snapshots and temporarily expose original clients instead.
+            with self.live():
+                return self._variant_proof(mapping,refresh=refresh,apply=apply,force_source=force_source,authorize=authorize)
         with self.observing():
             return self._variant_proof(mapping, refresh=refresh, apply=apply, force_source=force_source, authorize=authorize)
 
@@ -491,11 +513,9 @@ class PodcastCoordinator:
         from pine_metadata_repair import PineMetadataRepair
         if self.metadata_repair is None:
             self.metadata_repair = PineMetadataRepair(self.b)
-        batch=getattr(self, 'observation', None)
-        if batch is not None:batch.invalidate()
-        try:outcome = self.metadata_repair.repair_if_needed(mapping, apply)
-        finally:
-            if batch is not None:batch.invalidate()
+        try:
+            with self.live():outcome=self.metadata_repair.repair_if_needed(mapping,apply)
+        finally:self.invalidate_observations(mapping,services=('pine',),metadata=True)
         mapping['_pine_metadata_repair'] = outcome
         return outcome
 
@@ -747,7 +767,7 @@ class PodcastCoordinator:
             mapping.update(_pine_selected=False, _pine_status='waiting', _pine_reason_code=exc.reason)
             return self.observe_read(mapping)
 
-    def save_baseline(self, key, identity, states, raw):
+    def save_baseline(self, key, identity, states, raw, mapping=None):
         enrolled = 'pinepods' in states or (key in self.history and not self.b.load('_pine_transition:'+key))
         value = dict(mapping=identity, baseline=states, pine_raw=raw.get('pinepods'))
         if enrolled:
@@ -758,7 +778,7 @@ class PodcastCoordinator:
         previous = self.b.load(key)
         self.b.save(key, value)
         if not previous.get('baseline') or enrolled and not previous.get('pine_enrolled'):
-            self.invalidate_observations()
+            self.invalidate_observations(mapping)
 
     def handle(self, mapping, apply, settle):
         from podcast_status_sync import StatusCoordinator,StatusConflict,state_key,pending
@@ -806,7 +826,7 @@ class PodcastCoordinator:
                 public, snapshot = inspect(self, mapping, automatic=True)
             except ReviewError:
                 raise mismatch from None
-            states = self.mutate(commit, self, mapping, public, snapshot, 'abs', True)
+            states = self.mutate(commit,self,mapping,public,snapshot,'abs',True,_mapping=mapping)
             self.select_variant(mapping, snapshot[5])
             mapping.update(_pine_status='enrolled', _pine_enrolled=False)
             mapping.pop('_pine_status_reason_code', None)
@@ -838,7 +858,7 @@ class PodcastCoordinator:
                 if apply:
                     pending.update(stage='reconciled', after=raw)
                     b.write_record(pending['id'], key, pending, 'complete')
-                    self.save_baseline(key, expected_identity, states, raw)
+                    self.save_baseline(key, expected_identity, states, raw,mapping)
                 return 'unchanged', states
             raise RuntimeError('Interrupted podcast transfer requires journal review; it is not retried')
         manual=stored.get('manual_choice')
@@ -848,7 +868,7 @@ class PodcastCoordinator:
         else:source = choose_source(states, stored.get('baseline'), raw, stored.get('pine_raw'),
                                    primary_source=self.cfg.get('primary_source', 'auto'))
         if source is None:
-            if apply: self.save_baseline(key, expected_identity, states, raw)
+            if apply: self.save_baseline(key, expected_identity, states, raw,mapping)
             return 'unchanged', states
         if not apply: return 'proposed', states
         signature = fingerprint(raw)
@@ -906,7 +926,7 @@ class PodcastCoordinator:
 
         def abs_step(label, action, expected_position, statuses):
             nonlocal states, raw
-            unchanged(); checkpoint('sending_abs_' + label); self.mutate(action)
+            unchanged(); checkpoint('sending_abs_' + label); self.mutate(action,_mapping=mapping,_services=('abs',))
             current, fresh = self.read(mapping)
             if any(not raw_equal({k: fresh[k]}, {k: raw[k]}) for k in raw if k != 'abs'):
                 raise RuntimeError('Another podcast participant changed during ABS transfer')
@@ -930,7 +950,7 @@ class PodcastCoordinator:
             if goal['status'] == 'finished': source_stamp = completion
             if source_stamp:
                 values['LastPlayedDate'] = dt.datetime.fromtimestamp(source_stamp / 1000, dt.timezone.utc).isoformat()
-            checkpoint('sending_jellyfin'); self.mutate(self.jf.update, mapping['jf']['id'], values)
+            checkpoint('sending_jellyfin'); self.mutate(self.jf.update,mapping['jf']['id'],values,_mapping=mapping,_services=('jf',))
             current, fresh = self.read(mapping)
             expected = dict(raw['jf'], **values)
             if (not rows_equal([fresh['jf']], [expected]) or
@@ -948,7 +968,7 @@ class PodcastCoordinator:
         if not all(same(v, goal) for v in states.values()): raise RuntimeError('Podcast transfer result differs')
         record.update(stage='complete', after=raw)
         b.write_record(record['id'], key, record, 'complete')
-        self.save_baseline(key, expected_identity, states, raw)
+        self.save_baseline(key, expected_identity, states, raw,mapping)
         b.event(key, 'podcast_synced', dict(title=mapping['title'], show=mapping['show'], source=source,
                 seconds=round(goal['position'], 3), status=goal['status']))
         return 'synced', states
@@ -1046,7 +1066,9 @@ class PodcastCoordinator:
                     raise ValueError('Interrupted PinePods alias action target changed')
             if mapping['jf']['id'] in self.jf.active_ids(): return 'waiting',states
             checkpoint('sending_pinepods_'+str(index))
-            receipt=self.mutate(self.pine.write_action, action)
+            receipt=self.mutate(self.pine.write_action,action,
+                _mapping=dict(mapping,feed_url=action.get('podcast',mapping['feed_url']),
+                    enclosure_url=action.get('episode',mapping['enclosure_url'])),_services=('pine',))
             if isinstance(receipt,dict) and receipt.get('timestamp') is not None:
                 action['_server_timestamp']=action_epoch(receipt['timestamp'])
                 checkpoint('sending_pinepods_'+str(index))
@@ -1057,7 +1079,7 @@ class PodcastCoordinator:
         if not all(same(v,record['goal']) for v in states.values()): raise RuntimeError('Podcast transfer result differs')
         record.update(stage='complete',after=raw)
         b.write_record(record['id'],key,record,'complete')
-        self.save_baseline(key, identity, states, raw)
+        self.save_baseline(key, identity, states, raw,mapping)
         b.event(key,'podcast_synced',dict(title=mapping['title'],show=mapping['show'],source=record['source'],
                 seconds=round(record['goal']['position'],3),status=record['goal']['status']))
         return 'synced',states

@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import stat
 
+from cache_maintenance import mutation
+
 VERSION = 1
 MAX_RECORD_BYTES = 128 * 1024
 MAX_DISK_BYTES = 128 * 1024 * 1024
@@ -90,15 +92,16 @@ class ObservationStore:
             if len(raw)>min(MAX_RECORD_BYTES,self.max_bytes):return False
             directory=self._directory(create=True)
             if directory is None:return False
-            # A random owned temporary plus directory-relative rename never
-            # follows a substituted cache leaf to a media or user file.
-            temporary='.observation-'+os.urandom(16).hex()
-            fd=os.open(temporary,os.O_CREAT|os.O_EXCL|os.O_WRONLY|getattr(os,'O_NOFOLLOW',0),0o600,dir_fd=directory)
-            with os.fdopen(fd,'wb') as target:
-                target.write(raw);target.flush();os.fsync(target.fileno())
-            os.replace(temporary,name,src_dir_fd=directory,dst_dir_fd=directory);temporary=None
-            os.fsync(directory)
-            self._trim(directory,name)
+            epochs={self._name('folder-epoch',kind) for kind in ('all','audiobooks','ebooks','podcasts')}
+            with mutation(directory,max_bytes=self.max_bytes,max_entries=self.max_entries,pinned=epochs) as catalog:
+                # A random owned temporary plus directory-relative rename never
+                # follows a substituted cache leaf to a media or user file.
+                temporary='.observation-'+os.urandom(16).hex()
+                fd=os.open(temporary,os.O_CREAT|os.O_EXCL|os.O_WRONLY|getattr(os,'O_NOFOLLOW',0),0o600,dir_fd=directory)
+                with os.fdopen(fd,'wb') as target:
+                    target.write(raw);target.flush();os.fsync(target.fileno())
+                os.replace(temporary,name,src_dir_fd=directory,dst_dir_fd=directory);temporary=None
+                catalog.record(name);catalog.prune(name)
             return True
         except (OSError,ValueError,TypeError,KeyError,RecursionError):return False
         finally:
@@ -108,32 +111,16 @@ class ObservationStore:
                     except OSError:pass
                 os.close(directory)
 
-    def _trim(self,directory,current):
-        # Only our fixed regular cache leaves can be evicted. This path is on
-        # NVMe and runs on changed/new observations, never on ordinary hits.
-        entries=[]
-        epochs={self._name('folder-epoch',kind) for kind in ('all','audiobooks','ebooks','podcasts')}
-        for entry in os.scandir(directory):
-            if not re.fullmatch(r'[0-9a-f]{64}\.json',entry.name):continue
-            info=entry.stat(follow_symlinks=False)
-            if stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid():
-                entries.append((entry.name in epochs,entry.name==current,info.st_mtime_ns,entry.name,info.st_size))
-        entries.sort(reverse=True);used=0
-        for number,(pinned,_,_,name,size) in enumerate(entries):
-            used+=size
-            if not pinned and (number>=self.max_entries or used>self.max_bytes):
-                try:os.unlink(name,dir_fd=directory)
-                except FileNotFoundError:pass
-        os.fsync(directory)
-
     def forget(self,namespace,key):
         directory=None
         try:
             name=self._name(namespace,key);directory=self._directory()
             if directory is not None:
-                try:os.unlink(name,dir_fd=directory)
-                except FileNotFoundError:pass
-                os.fsync(directory)
+                epochs={self._name('folder-epoch',kind) for kind in ('all','audiobooks','ebooks','podcasts')}
+                with mutation(directory,max_bytes=self.max_bytes,max_entries=self.max_entries,pinned=epochs) as catalog:
+                    try:os.unlink(name,dir_fd=directory)
+                    except FileNotFoundError:return
+                    catalog.discard(name)
         except (OSError,ValueError,TypeError):pass
         finally:
             if directory is not None:os.close(directory)

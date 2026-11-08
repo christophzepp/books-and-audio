@@ -11,7 +11,7 @@ import uuid
 
 from cryptography.fernet import Fernet
 
-KINDS = frozenset('connection.create connection.update connection.delete connection.test connection.activate connection.deactivate folder.create folder.update folder.delete folder.test folder.activate folder.deactivate provider.preview provider.activate podcast.preview podcast.configure episode.preview episode.approve episode.status_preview episode.status_apply review.preview review.approve sync.pause sync.resume events.clear'.split())
+KINDS = frozenset('connection.create connection.update connection.delete connection.test connection.activate connection.deactivate folder.create folder.update folder.delete folder.test folder.activate folder.deactivate provider.preview provider.activate podcast.preview podcast.configure episode.preview episode.approve episode.status_preview episode.status_apply review.preview review.approve ebook.retry sync.pause sync.resume events.clear'.split())
 
 
 def stamp():

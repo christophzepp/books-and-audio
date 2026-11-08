@@ -39,7 +39,8 @@ class _MemoRequests:
         self._observation_request = getattr(source, request_name)
         setattr(self, request_name, self._memo_request)
 
-    def _memo_request(self, method, path, *args, **kwargs):
+    def _memo_value(self, method, path, *args, **kwargs):
+        """Internal borrowed JSON. Public readers must return isolated copies."""
         if not _readonly(method, path, pine=self._observation_pine,
                          bookorbit=self._observation_bookorbit):
             raise RuntimeError('Observation snapshot cannot send mutations')
@@ -48,7 +49,21 @@ class _MemoRequests:
             self._count('api_observation_requests')
             self._observation_cache[key] = self._observation_request(method, path, *args, **kwargs)
         else:self._count('api_observation_cache_hits')
-        return copy.deepcopy(self._observation_cache[key])
+        return self._observation_cache[key]
+
+    def _memo_request(self, method, path, *args, **kwargs):
+        return copy.deepcopy(self._memo_value(method,path,*args,**kwargs))
+
+    def _fresh_request(self, method, path, *args, **kwargs):
+        if not _readonly(method,path,pine=self._observation_pine,bookorbit=self._observation_bookorbit):
+            raise RuntimeError('Observation snapshot cannot send mutations')
+        self._count('api_observation_requests')
+        return self._observation_request(method,path,*args,**kwargs)
+
+    def _drop_requests(self, predicate):
+        for key in list(self._observation_cache):
+            args,kwargs=json.loads(key)
+            if predicate(args,kwargs):self._observation_cache.pop(key,None)
 
     def _count(self, name):
         if self._observation_owner is not None:
@@ -66,13 +81,18 @@ class ABSObservation(_MemoRequests, ABSClient):
         self._items = {}
         self._episodes = {}
         self._progress_index = None
+        self._dirty_progress=set()
+        self._progress_overrides={}
 
-    def item(self, item_id):
+    def _load_item(self,item_id):
         self._id(item_id)
         if item_id not in self._items:
-            item = ABSClient.item(self, item_id)
-            self._items[item_id] = item
-        return copy.deepcopy(self._items[item_id])
+            self._items[item_id]=self._memo_value('GET','/api/items/'+self._id(item_id),
+                '/api/items/{item_id}',params={'expanded':1,'include':'progress'})
+        return self._items[item_id]
+
+    def item(self, item_id):
+        return copy.deepcopy(self._load_item(item_id))
 
     def episode_item(self, item_id, episode_id):
         """Same validated source fields with exactly one indexed episode.
@@ -81,9 +101,7 @@ class ABSObservation(_MemoRequests, ABSClient):
         Duplicate/missing IDs fail closed just like the ordinary source reader.
         """
         self._id(item_id); self._id(episode_id)
-        if item_id not in self._items:
-            self.item(item_id)
-        item = self._items[item_id]
+        item = self._load_item(item_id)
         if item_id not in self._episodes:
             rows = item.get('media', {}).get('episodes')
             if not isinstance(rows, list):
@@ -103,10 +121,46 @@ class ABSObservation(_MemoRequests, ABSClient):
         self._count('api_observation_index_hits')
         return result
 
+    def _load_progress(self):
+        if self._progress_index is None:
+            data=self._memo_value('GET','/api/me/progress','/api/me/progress')
+            self._index_progress(self._list(data,'mediaProgress','/api/me/progress'))
+
     def allprogress(self):
-        rows = ABSClient.allprogress(self)
-        self._index_progress(rows)
-        return rows
+        self._load_progress()
+        for key in list(self._dirty_progress):self._refresh_progress(*key)
+        values=dict(self._progress_index)
+        values.update(self._progress_overrides)
+        return [copy.deepcopy(row) for row in values.values() if row is not None]
+
+    def invalidate_progress(self,*,item_id=None,episode_id=None,**scope):
+        if item_id is None:
+            self._progress_index=None;self._dirty_progress.clear();self._progress_overrides.clear()
+            self._drop_requests(lambda args,kwargs:args[1].startswith('/api/me/progress'))
+            return
+        key=(item_id,episode_id)
+        self._progress_overrides.pop(key,None);self._dirty_progress.add(key)
+
+    def _refresh_progress(self,item_id,episode_id):
+        path='/api/me/progress/'+self._id(item_id)
+        if episode_id is not None:path+='/'+self._id(episode_id)
+        row=self._fresh_request('GET',path,'/api/me/progress/{item_id}/{episode_id}',missing_ok=True)
+        if row is not None and (not isinstance(row,dict) or row.get('libraryItemId')!=item_id
+                                or row.get('episodeId')!=episode_id):
+            raise ABSError('GET /api/me/progress: invalid progress identity')
+        key=(item_id,episode_id)
+        self._progress_overrides[key]=copy.deepcopy(row);self._dirty_progress.discard(key)
+
+    def _progress(self,item_id,episode_id):
+        self._id(item_id)
+        if episode_id is not None:self._id(episode_id)
+        key=(item_id,episode_id)
+        if key in self._dirty_progress:self._refresh_progress(*key)
+        if key in self._progress_overrides:row=self._progress_overrides[key]
+        else:
+            self._load_progress();row=self._progress_index.get(key)
+        self._count('api_observation_index_hits')
+        return copy.deepcopy(row)
 
     def _index_progress(self, rows):
         if self._progress_index is not None:
@@ -123,19 +177,11 @@ class ABSObservation(_MemoRequests, ABSClient):
             index[key] = row
         self._progress_index = index
 
-    def episode_progress(self, item_id, episode_id):
-        self._id(item_id); self._id(episode_id)
-        if self._progress_index is None:
-            self._index_progress(ABSClient.allprogress(self))
-        self._count('api_observation_index_hits')
-        return copy.deepcopy(self._progress_index.get((item_id, episode_id)))
+    def episode_progress(self,item_id,episode_id):
+        return self._progress(item_id,episode_id)
 
-    def progress(self, item_id):
-        self._id(item_id)
-        if self._progress_index is None:
-            self._index_progress(ABSClient.allprogress(self))
-        self._count('api_observation_index_hits')
-        return copy.deepcopy(self._progress_index.get((item_id, None)))
+    def progress(self,item_id):
+        return self._progress(item_id,None)
 
 
 class PineObservation(_MemoRequests, PinepodsClient):
@@ -149,6 +195,22 @@ class PineObservation(_MemoRequests, PinepodsClient):
         self._calibrated = {}
         self._metadata = {}
         self._actions_index = {}
+        self._dirty_metadata=set()
+        self._dirty_actions=set()
+
+    def invalidate_progress(self,*,feed_url=None,enclosure_url=None,**scope):
+        if feed_url is None or enclosure_url is None:
+            self._metadata.clear();self._actions_index.clear()
+            self._calibrated.clear();self._catalogs.clear();self._catalog_data.clear()
+            self._observation_cache.clear()
+            return
+        key=(feed_url,enclosure_url)
+        self._metadata.pop(key,None)
+        self._dirty_metadata.add(key);self._dirty_actions.add(key)
+        # Typed indexed readers retain unrelated actions. Explicit full-feed
+        # readers (alias-history guards) must not receive the old raw envelope.
+        self._drop_requests(lambda args,kwargs:args[1].startswith('/api/2/episodes/')
+            and (kwargs.get('params') or {}).get('podcast') in (None,feed_url))
 
     def _native_catalog(self, feed_url, user_id):
         key = (feed_url, user_id)
@@ -187,6 +249,12 @@ class PineObservation(_MemoRequests, PinepodsClient):
         _url(feed_url); _url(enclosure_url); _number(duration, minimum=0.001)
         user_id = self._ensure_native()
         key = (feed_url, enclosure_url)
+        if key in self._dirty_metadata:
+            # Catalog progress fields are old after a write. Recheck only this
+            # episode with the original client's complete identity guards.
+            self._metadata[key]=copy.deepcopy(self._observation_source.inspect_episode_metadata(
+                feed_url,enclosure_url,duration))
+            self._dirty_metadata.discard(key)
         if key not in self._metadata:
             projected, episode_id, podcast_id = self._projection(feed_url, user_id, enclosure_url)
             if (feed_url not in self._calibrated or projected is None
@@ -206,6 +274,19 @@ class PineObservation(_MemoRequests, PinepodsClient):
         return result
 
     def _episode_actions(self, feed_url, enclosure_url):
+        key=(feed_url,enclosure_url)
+        if key in self._dirty_actions:
+            # gPodder exposes a per-feed history endpoint; read it live once
+            # for the changed target, retaining all unrelated indexed actions.
+            rows=self._observation_source._episode_actions(feed_url,enclosure_url)
+            selected=[copy.deepcopy(row) for row in rows
+                      if row['podcast']==feed_url and row['episode']==enclosure_url]
+            if feed_url not in self._actions_index:
+                index={}
+                for row in rows:index.setdefault((row['podcast'],row['episode']),[]).append(copy.deepcopy(row))
+                self._actions_index[feed_url]=index
+            else:self._actions_index[feed_url][key]=selected
+            self._dirty_actions.discard(key)
         if feed_url not in self._actions_index:
             data = PinepodsClient.actions(self, feed_url)
             index = {}
@@ -231,9 +312,35 @@ class JellyfinObservation(_MemoRequests):
     def __init__(self, source):
         self._initialize(source, request_name='request')
         self._inventories = []
+        self._dirty_ids=set()
+
+    def invalidate_progress(self,*,jf_ids=None,**scope):
+        if jf_ids is None:
+            self._inventories.clear();self._observation_cache.clear();self._dirty_ids.clear()
+        else:self._dirty_ids.update(jf_ids)
+
+    def _refresh_items(self,ids,parent,types):
+        from jellyfin_client import JellyfinClient
+        self._drop_requests(lambda args,kwargs:args[1]=='/Items'
+            and bool(set(((args[2] if len(args)>2 else kwargs.get('params',{})) or {}).get('ids','').split(',')) & set(ids)))
+        rows=JellyfinClient.items(self,parent,ids,types)
+        for group in self._inventories:
+            if group['types']!=types:continue
+            for row in rows:
+                ident=row['Id']
+                if ident in group['index']:
+                    order,_=group['index'][ident]
+                    group['index'][ident]=(order,copy.deepcopy(row))
+        self._dirty_ids.difference_update(ids)
 
     def items(self, parent=None, ids=None, types='AudioBook,Book'):
         from jellyfin_client import JellyfinClient
+        dirty=[ident for ident in ids or [] if ident in self._dirty_ids]
+        if not ids:
+            dirty=list({ident for group in self._inventories
+                        if group['types']==types and group['parent']==parent
+                        for ident in group['index'] if ident in self._dirty_ids})
+        if dirty:self._refresh_items(dirty,parent,types)
         if ids:
             if (len(set(ids)) != len(ids)
                     or any(not isinstance(value,str) or not re.fullmatch('[a-f0-9]{32}',value) for value in ids)):
@@ -315,5 +422,27 @@ class ObservationBatch:
             for owner, attribute, value in reversed(previous):
                 setattr(owner, attribute, value)
 
-    def invalidate(self):
-        self._clients.clear()
+    @contextmanager
+    def live(self,*bindings):
+        """Temporarily expose original clients without discarding observations."""
+        previous=[]
+        try:
+            for owner,attribute in bindings:
+                value=getattr(owner,attribute,None)
+                source=value._observation_source if getattr(value,'_observation_only',False) is True else value
+                previous.append((owner,attribute,value));setattr(owner,attribute,source)
+            yield
+        finally:
+            for owner,attribute,value in reversed(previous):setattr(owner,attribute,value)
+
+    def invalidate(self,*sources,**scope):
+        if not sources:
+            self._clients.clear()
+            return
+        for source in sources:
+            if getattr(source,'_observation_only',False) is True:source=source._observation_source
+            key=id(source);snapshot=self._clients.get(key)
+            if snapshot is None:continue
+            invalidate=getattr(snapshot,'invalidate_progress',None)
+            if scope and callable(invalidate):invalidate(**scope)
+            else:self._clients.pop(key,None)

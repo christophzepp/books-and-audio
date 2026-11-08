@@ -13,12 +13,17 @@ class IOPolicyTests(unittest.TestCase):
         self.assertEqual(settings({})['ebook_discovery_interval_seconds'], 300)
         self.assertEqual(settings({})['ebook_cache_max_bytes'], 1024**3)
         self.assertEqual(settings({})['ebook_cache_max_entries'], 4096)
+        self.assertEqual(settings({})['ebook_retry_initial_seconds'],300)
+        self.assertEqual(settings({})['ebook_retry_max_seconds'],86400)
 
     def test_invalid_configuration_does_not_silently_relax_checks(self):
         for value in ([], None, {'unknown': 1}, {'ebook_cache_max_bytes': True},
                       {'ebook_cache_max_bytes': 16*1024**3+1},
                       {'ebook_cache_max_entries': True}, {'ebook_cache_max_entries': 0},
                       {'ebook_cache_max_entries': 100001},
+                      {'ebook_retry_initial_seconds': True}, {'ebook_retry_initial_seconds':29},
+                      {'ebook_retry_max_seconds':604801},
+                      {'ebook_retry_initial_seconds':600,'ebook_retry_max_seconds':300},
                       {'folder_validation_interval_seconds': 1},
                       {'ebook_verify_interval_seconds': float('nan')},
                       {'ebook_candidate_stable_seconds': 1},
