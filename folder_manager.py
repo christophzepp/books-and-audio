@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import errno
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import time
 import uuid
+from io_metrics import increment
 
 
 class FolderManagerError(ValueError):
@@ -160,11 +164,20 @@ class FolderManager:
     It should check copied coordinator state + application paths without writing
     progress. Root aliases alone cannot prove that apps see the same files.
     """
-    def __init__(self, root, base_config, access_roots=None, mount_checker=None):
+    def __init__(self, root, base_config, access_roots=None, mount_checker=None,
+                 generation_reader=None, clock=None):
         self.root = Path(root) / 'control'
         self.path = self.root / 'folders.json'
         self.base_config = copy.deepcopy(base_config)
         self.mount_checker = mount_checker or os.path.ismount
+        self.generation_reader = generation_reader or self._mount_generation
+        self.clock = clock or time.monotonic
+        self._checks = {}
+        self._generation = None
+        self._context = None
+        self._state_signature = None
+        self._error_epochs = {kind: 0 for kind in KINDS}
+        self._invalidation_epoch = 0
         roots = access_roots if access_roots is not None else base_config.get('folder_access_roots')
         if roots is None:
             roots = [dict(worker=p) for p in ('/audiobooks', '/ebooks', '/podcasts') if self.mount_checker(p)]
@@ -188,6 +201,105 @@ class FolderManager:
             row['paths'] = self._with_server(row['paths'])
         self._validate_state(initial)
         self.initial = initial
+
+    @staticmethod
+    def _mount_generation():
+        # procfs metadata lives in memory. Never touch the media roots to render
+        # the GUI. Absence of a readable generation disables reuse of positives.
+        try:
+            return hashlib.sha256(Path('/proc/self/mountinfo').read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _signature(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                        allow_nan=False).encode()).hexdigest()
+
+    def _record_check(self, row):
+        key = self._signature(row)
+        try:
+            proof = self.check(row)
+            check = dict(ok=True, code=proof['code'])
+        except FolderManagerError as exc:
+            check = dict(ok=False, code=str(exc))
+            self._error_epochs[row['kind']] += 1
+        self._checks[key] = dict(check=check, at=self.clock(),
+                                identity=proof.get('identity') if check['ok'] else None)
+        return check
+
+    def invalidate(self):
+        """Forget physical evidence after a failed operation or changed input."""
+        self._checks.clear()
+        self._generation = None
+        self._invalidation_epoch += 1
+
+    def _sample_generation(self, state, context=None):
+        context = self._context if context is None else context
+        try:
+            mount = self.generation_reader()
+        except Exception:
+            mount = None
+        if not isinstance(mount, str) or not mount:
+            return None
+        return self._signature([mount, context, state])
+
+    def generation(self, kind=None, *, context=None):
+        """Cheap cache binding; an unavailable mount generation is never a hit."""
+        if kind is not None and kind not in KINDS:
+            fail('invalid_folder_kind')
+        state, _ = self._read()
+        generation = self._sample_generation(state, context)
+        if generation is None:
+            fail('folder_generation_unavailable')
+        errors = self._error_epochs if kind is None else self._error_epochs[kind]
+        return self._signature([generation, self._invalidation_epoch, errors])
+
+    def refresh(self, *, force=False, kind=None, context=None):
+        """Refresh one shared snapshot, never inactive folders during idle work.
+
+        A real file operation calls require() for its kind. Ordinary GUI/config
+        reads reuse this snapshot until the bounded integrity interval expires.
+        context is host deployment identity, excluding only its observation time;
+        it never extends or replaces the separate 150-second deployment guard.
+        """
+        if kind is not None and kind not in KINDS:
+            fail('invalid_folder_kind')
+        state, _ = self._read()
+        if context is not None:
+            self._context = copy.deepcopy(context)
+        signature = self._signature(state)
+        generation = self._sample_generation(state, context)
+        if signature != self._state_signature or generation != self._generation:
+            self._checks.clear()
+            self._state_signature, self._generation = signature, generation
+        from io_policy import settings
+        interval = settings(self.base_config)['folder_validation_interval_seconds']
+        now = self.clock()
+        for row in state['rows']:
+            if not row['active'] or kind is not None and row['kind'] != kind:
+                continue
+            previous = self._checks.get(self._signature(row))
+            retry_interval = interval if previous and previous['check']['ok'] else min(interval, 60)
+            age = now - previous['at'] if previous else retry_interval
+            # If mountinfo is unavailable, never silently trust a cached positive.
+            if force or generation is None or not previous or not 0 <= age < retry_interval:
+                self._record_check(row)
+            else:
+                increment(self, 'folder_snapshot_hits')
+        return state
+
+    def require(self, kind, *, context=None):
+        """Recheck current media paths immediately before real file work."""
+        state = self.refresh(force=True, kind=kind, context=context)
+        rows = [r for r in state['rows'] if r['active'] and r['kind'] == kind]
+        if not rows:
+            fail('folder_mapping_missing')
+        for row in rows:
+            check = self._checks[self._signature(row)]['check']
+            if check['ok'] is not True:
+                fail(check['code'])
+        return True
 
     def _with_server(self, paths):
         result = _paths(paths)
@@ -300,9 +412,11 @@ class FolderManager:
             directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try: os.fsync(directory)
             finally: os.close(directory)
+        self.refresh(force=True)
         return self.public()
 
     def check(self, row):
+        increment(self, 'folder_checks')
         paths = self._with_server(row['paths'])
         matches = [root for root in self.access_roots if _under(paths['worker'], root['worker']) is not None]
         if len(matches) != 1:
@@ -312,36 +426,37 @@ class FolderManager:
             fail('folder_mount_unavailable')
         try:
             directory = Path(paths['worker'])
-            # Resolve all ancestors to reject symlink redirects, including the mount.
-            if directory.resolve(strict=True) != directory or not directory.is_dir():
-                fail('folder_symlink_or_not_directory')
-            for ancestor in (directory, *directory.parents):
-                if ancestor.is_symlink():
-                    fail('folder_symlink_or_not_directory')
+            # One descriptor walk proves every ancestor is a real directory.
+            # resolve/is_dir/is_symlink would repeat the same media metadata I/O
+            # and still require this race-resistant O_NOFOLLOW walk afterwards.
             fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 for component in directory.parts[1:]:
                     child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                     os.close(fd); fd = child
-                if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                info = os.fstat(fd)
+                if not stat.S_ISDIR(info.st_mode):
                     fail('folder_symlink_or_not_directory')
+                identity = dict(device=info.st_dev, inode=info.st_ino)
             finally: os.close(fd)
         except FolderManagerError:
             raise
-        except OSError:
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise FolderManagerError('folder_symlink_or_not_directory') from None
             raise FolderManagerError('folder_unavailable') from None
-        return dict(ok=True, code='folder_checked', paths=paths, media_changed=False)
+        return dict(ok=True, code='folder_checked', paths=paths, media_changed=False,
+                    identity=identity)
 
     def public(self):
         state, _ = self._read()
+        checks = self._checks if self._state_signature == self._signature(state) else {}
         rows = []
         for row in state['rows']:
             result = copy.deepcopy(row)
-            try:
-                check = self.check(row)
-                result['check'] = dict(ok=True, code=check['code'])
-            except FolderManagerError as exc:
-                result['check'] = dict(ok=False, code=str(exc))
+            saved = checks.get(self._signature(row))
+            result['check'] = copy.deepcopy(saved['check']) if saved else dict(
+                ok=False, code='folder_check_pending')
             rows.append(result)
         return dict(revision=state['revision'], rows=rows, kinds=copy.deepcopy(KINDS),
                     endpoints=copy.deepcopy(ENDPOINTS), access_roots=copy.deepcopy(self.access_roots))
@@ -369,16 +484,16 @@ class FolderManager:
                 settings['folder_error'] = 'podcast_folder_missing'
         return result
 
-    def effective(self, config=None):
-        state, _ = self._read()
+    def effective(self, config=None, *, context=None):
+        state = self.refresh(context=context)
         podcast_error = None
         for row in state['rows']:
             if row['active']:
-                if row['kind'] == 'podcasts':
-                    try: self.check(row)
-                    except FolderManagerError as exc: podcast_error = str(exc)
-                else:
-                    self.check(row)
+                saved = self._checks.get(self._signature(row))
+                check = saved['check'] if saved else dict(ok=False, code='folder_check_pending')
+                if not check['ok']:
+                    if row['kind'] == 'podcasts': podcast_error = check['code']
+                    else: fail(check['code'])
         result = self._effective(state, self.base_config if config is None else config)
         if podcast_error:
             spec = result.setdefault('podcasts', {})
@@ -417,7 +532,14 @@ class FolderManager:
                         changed = dict(row['paths']); changed.pop('server', None)
                         changed.update(payload['paths']); row['paths'] = self._with_server(changed)
                 if action in {'test', 'activate'} or action == 'update' and row['active']:
-                    proof = self.check(row)
+                    try:
+                        proof = self.check(row)
+                    except FolderManagerError as exc:
+                        self._checks[self._signature(row)] = dict(
+                            check=dict(ok=False, code=str(exc)), at=self.clock())
+                        raise
+                    self._checks[self._signature(row)] = dict(
+                        check=dict(ok=True, code=proof['code']), at=self.clock())
                     if action == 'test':
                         return dict(ok=True, code='folder_checked', revision=revision, folder_id=row['id'], check=proof)
                     if action == 'activate':
@@ -440,6 +562,7 @@ class FolderManager:
                 self._validate_state(state)
                 state['revision'] += 1
                 self._write(state, raw)
+                self.invalidate()
                 return dict(ok=True, code='folder_saved', revision=state['revision'], folder_id=row['id'])
         except FolderManagerError as exc:
             return dict(ok=False, code=str(exc), revision=revision)

@@ -1,9 +1,11 @@
 import copy
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from ebook_discovery import discover, refresh
 from watch_deployment import validate_ebook_mounts, DeploymentError
@@ -59,7 +61,9 @@ class DiscoveryTests(EbookTests):
         with zipfile.ZipFile(self.path, 'a') as z:z.writestr('overlay.smil','<smil/>')
         self.files[0]['sizeBytes']=self.path.stat().st_size
         new, obs, r = self.discover()
-        self.assertFalse(new or obs); self.assertIn('Read-along',r['blocked'][0]['reason'])
+        self.assertFalse(new); self.assertEqual(r['waiting'], 1)
+        new, _, r = self.discover(obs, 1061)
+        self.assertFalse(new); self.assertIn('Read-along',r['blocked'][0]['reason'])
 
     def test_missing_index_waits_and_changed_bytes_restart_observation(self):
         _, obs, _ = self.discover()
@@ -69,6 +73,61 @@ class DiscoveryTests(EbookTests):
         self.assertFalse(new);self.assertEqual(updated['1']['since'],1100)
         self.jitems=[]
         self.assertEqual(self.discover(updated, 1200)[2]['waiting'],1)
+
+    def test_first_and_unstable_observations_never_read_epub_contents(self):
+        with patch('ebook_discovery.inspect_epub', side_effect=AssertionError('content read')) as inspect:
+            _, obs, r = self.discover()
+            self.assertEqual(r['waiting'], 1)
+            for at in (1001, 1020, 1059):
+                additions, obs, _ = self.discover(obs, at)
+                self.assertFalse(additions)
+            self.files[0]['sizeBytes'] += 1
+            self.assertFalse(self.discover(obs, 1100)[0])
+            inspect.assert_not_called()
+
+    def test_same_size_edit_with_restored_mtime_restarts_stability(self):
+        _, obs, _ = self.discover()
+        original = self.path.stat()
+        raw = self.path.read_bytes()
+        self.path.write_bytes(raw.replace(b'Hello', b'Hallo'))
+        os.utime(self.path, ns=(original.st_atime_ns, original.st_mtime_ns))
+        with patch('ebook_discovery.inspect_epub', side_effect=AssertionError('content read')) as inspect:
+            additions, updated, _ = self.discover(obs, 1100)
+            self.assertFalse(additions)
+            self.assertEqual(updated['1']['since'], 1100)
+            inspect.assert_not_called()
+
+    def test_mutation_during_content_validation_never_admits(self):
+        _, obs, _ = self.discover()
+        from ebook_discovery import inspect_epub
+        def change(path, **kwargs):
+            index = inspect_epub(path, **kwargs)
+            with zipfile.ZipFile(path, 'a') as archive:
+                archive.writestr('late-metadata.txt', 'changed while checking')
+            return index
+        with patch('ebook_discovery.inspect_epub', side_effect=change):
+            additions, observed, report = self.discover(obs, 1061)
+        self.assertFalse(additions or observed)
+        self.assertIn('changed during validation', report['blocked'][0]['reason'])
+
+    def test_no_new_api_candidates_does_not_request_physical_folder_guard(self):
+        from unittest.mock import Mock
+        guard = Mock(side_effect=AssertionError('unnecessary media traversal'))
+        self.cards = []
+        additions, _, _ = discover(self.bo, self.discovery_jf, self.spec, [], {}, 1000, media_guard=guard)
+        self.assertFalse(additions)
+        guard.assert_not_called()
+
+    def test_admission_seeds_reusable_index_after_stable_validation(self):
+        from epub_index_cache import EpubIndexCache
+        from epub_locations import EpubLocations
+        cache = EpubIndexCache()
+        _, obs, _ = self.discover()
+        additions, _, _ = discover(self.bo, self.discovery_jf, self.spec, [], obs, 1061, index_cache=cache)
+        self.assertEqual(len(additions), 1)
+        with patch.object(EpubLocations, 'from_bytes', side_effect=AssertionError('second index build')):
+            index = cache.get(self.path, additions[0]['sha256'], additions[0]['size'])
+        self.assertEqual(index.hash, additions[0]['sha256'])
 
     def test_mount_proof_rejects_changed_image_source_and_nested_mount(self):
         spec=dict(self.spec, jf_image='jf', shared_host_root='/media/ebooks')

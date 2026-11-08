@@ -1,3 +1,15 @@
+## 0.1.0-beta.9 – Weniger Zugriffe auf Medienplatten
+
+- Unveränderte, bestätigte E-Book-Stände werden zuerst über die aktuellen API- und Mountidentitäten verglichen. Ohne Änderungen entfallen Dateiöffnung, vollständiges Hashing und Indexaufbau; offene Übertragungsjournale und echte Änderungen werden weiterhin geprüft.
+- EPUB-Positionsindizes werden als geprüfte, versionsgebundene JSON-Daten unter `state/ebook-index-cache` wiederverwendet, auch nach Containerneustarts. Der Cache ist begrenzt und ersetzt keine aktuelle Prüfung der Originaldatei vor einer Übertragung.
+- Medienordner teilen einen Prüfstand mit standardmäßig 15 Minuten Gültigkeit. GUI-Aktualisierungen führen keine eigenen Ordnerdurchläufe mehr aus. Mount- und relevante Konfigurationsänderungen entwerten den Prüfstand; tatsächliche E-Book-Dateioperationen und manuelle Medienprüfungen kontrollieren die betroffenen Pfade erneut.
+- Neue EPUB-Dateien werden erst nach stabiler Metadatenbeobachtung vollständig gelesen. Gültige negative Podcast-Wartefristen werden vor lokalen Pfadprüfungen ausgewertet; positive Bereitschaft und fällige Messungen behalten ihre bisherigen Prüfungen.
+- Unveränderte GUI-Snapshots werden nicht ständig neu geschrieben. Der Lebensnachweis bleibt höchstens 60 Sekunden alt; dauerhafte Übertragungsjournale und die 150-Sekunden-Grenze für Deploymentnachweise bleiben erhalten.
+- Zusätzliche Integritätsprüfungen mit optionalem UTC-Zeitfenster und Speichergrenzen sind unter `io_policy` konfigurierbar. RAM-Zähler zeigen Inhaltslesungen, Indexaufbauten, Cachetreffer und übersprungene Prüfungen. [Einrichtung und Messung](BETRIEB.md#medienzugriffe-ab-beta-9).
+- 1.413 Tests bestanden, darunter 100 unveränderte Abgleiche ohne zusätzliche Inhaltslesungen oder Indexaufbauten sowie Änderungen während Übertragungen, Mountwechsel, beschädigte Caches und umgeleitete Pfade.
+
+Docker: `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.9` oder `beta`, für Linux AMD64 und ARM64. Bestehende Verbindungen, Freigaben und Fortschritte bleiben erhalten. Ein separater Tracking-Stack muss für diese Optimierung nicht neu erstellt werden.
+
 ## 0.1.0-beta.8 – Statusfreigaben während des Weiterhörens
 
 - Eine bestätigte Freigabe des PinePods-Status „angefangen“ bleibt vor der Planerstellung bei reiner PinePods-Sekundenbewegung und deren abgeleiteten Revisionen verwendbar. Die Statuswerte aller Teilnehmer und sämtliche übrigen Rohdaten müssen unverändert sein. Der bisherige Vergleich konnte eine Freigabe direkt nach dem Weiterhören erneut sperren.

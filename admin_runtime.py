@@ -17,6 +17,7 @@ from jellyfin_client import JellyfinClient
 from admin_store import AdminStore, atomic, stamp
 from connection_manager import ConnectionManager, variant_flag_only_enable
 from folder_manager import FolderManager, FolderManagerError
+from io_metrics import increment, snapshot
 
 
 def options(kind, cfg, credentials):
@@ -184,6 +185,7 @@ class Administration:
         self.identity_path = self.store.control / 'account-identities.enc'
         self.store.recover()
         self.identities = None
+        self._published_snapshots = {}
         if self.identity_path.exists():
             self.identities = self.store.decode(self.identity_path.read_bytes())
 
@@ -293,11 +295,71 @@ class Administration:
         cfg, creds, disabled = self.manager.effective()
         cfg = self.podcast_effective(cfg)
         if self.folders:
-            try: cfg = self.folders.effective(cfg)
+            try: cfg = self.folders.effective(cfg, context=self.folder_context())
             except FolderManagerError as exc: disabled = folder_error(str(exc))
         if self.identities and cfg.get('bookbridge'):
             cfg['bookbridge']['expected_abs_username'] = self.identities.get('audiobookshelf', {}).get('username')
         return cfg, creds, disabled
+
+    def folder_context(self, kind=None):
+        """Generation of real host evidence, independent of its heartbeat time."""
+        try:
+            gate = json.loads((self.root / 'deployment.json').read_text())
+            if not isinstance(gate, dict): raise ValueError('Invalid receipt')
+            # Only structural fields are cache identities. Observation times or
+            # unrelated podcast checks must not reread unchanged book contents.
+            if kind == 'podcasts':
+                return {k: gate.get(k) for k in ('podcasts_ok', 'podcast_mounts', 'pinepods_ok')}
+            fields = ('folder_gate_ok', 'folder_mounts', 'folder_errors',
+                      'ok', 'bookbridge_ok')
+            value = {k: gate.get(k) for k in fields}
+            if kind in {'ebooks', 'audiobooks'}:
+                cfg, _, _ = self.manager.effective()
+                provider = cfg.get('mapping_provider', 'bookorbit')
+                endpoints = {'worker', 'bb'} if provider == 'bookbridge' else {'worker', 'bo'}
+                if kind == 'audiobooks': endpoints.add('abs')
+                if cfg.get('jellyfin', {}).get('enabled'): endpoints.add('jf')
+                for key in ('folder_mounts', 'folder_errors'):
+                    rows = value[key]
+                    value[key] = {k: v for k, v in rows.items() if k in endpoints} if isinstance(rows, dict) else rows
+                value.pop('ok' if provider == 'bookbridge' else 'bookbridge_ok', None)
+            return value
+        except (OSError, ValueError):
+            return {'deployment_unavailable': True}
+
+    def media_guard(self, kind):
+        if self.folders is not None:
+            self.folders.require(kind, context=self.folder_context())
+
+    def media_generation(self, kind):
+        if self.folders is not None:
+            return self.folders.generation(kind, context=self.folder_context(kind))
+        return None
+
+    def publish_changed(self, name, value, *, heartbeat=None):
+        """Deduplicate disposable GUI snapshots; keep a bounded live heartbeat.
+
+        Coordinator receipts, journals and command transactions keep their
+        existing durable writes. Only presentation files use this suppression.
+        """
+        comparison = copy.deepcopy(value)
+        if name == 'status.json':
+            comparison.get('worker', {}).pop('at', None)
+            comparison.pop('io_metrics', None)
+        signature = hashlib.sha256(json.dumps(comparison, sort_keys=True,
+            ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        previous = self._published_snapshots.get(name)
+        now = time.monotonic()
+        path = self.store.control / name
+        if (previous and previous[0] == signature and path.exists()
+                and (heartbeat is None or 0 <= now - previous[1] < heartbeat)):
+            increment(self, 'gui_snapshot_skips')
+            return False
+        if name == 'status.json': value = dict(value, published_at=time.time())
+        atomic(path, value)
+        self._published_snapshots[name] = (signature, now)
+        increment(self, 'gui_snapshot_writes')
+        return True
 
     def podcast_effective(self, cfg):
         cfg = copy.deepcopy(cfg)
@@ -485,6 +547,9 @@ class Administration:
         command = self.store.claim(preview_only=True) if preview_only else self.store.claim()
         if command is None: return False
         ident, kind, payload = command['id'], command['kind'], command['payload']
+        def require_media(media_kind):
+            guard = getattr(self, 'media_guard', None)
+            if guard is not None: guard(media_kind)
         try:
             if kind.startswith('connection.'):
                 if kind.split('.')[1] in {'update', 'activate', 'deactivate', 'delete'} and self.podcast_pending():
@@ -505,11 +570,13 @@ class Administration:
                 try:
                     if bridge is None:raise ReviewError('Verbindungen nicht verfügbar.')
                     if kind=='episode.status_preview' and set(payload)=={'episode_id'}:
+                        require_media('podcasts')
                         row=episode_editor.review(bridge,payload['episode_id'])
                         self.store.finish(ident,result=dict(row,review_id=ident),private=row)
                     elif kind=='episode.status_apply' and set(payload)=={'review_id','digest','source','confirm'} and payload['confirm'] is True:
                         row=self.store.review(payload['review_id'],'episode.status_preview')
                         if row['digest']!=payload['digest']:raise ReviewError('Die Freigabe passt nicht zur Prüfung.')
+                        require_media('podcasts')
                         episode_editor.review(bridge,row['episode_id'],record=row,source=payload['source'])
                         self.store.finish(ident,result={'approved':True})
                     else:raise ReviewError('Ungültiger Prüfauftrag.')
@@ -520,6 +587,7 @@ class Administration:
                     if bridge is None:
                         raise podcast_review.ReviewError('Bitte zuerst die Podcast-Verbindungen prüfen.')
                     if kind == 'episode.preview' and set(payload) == {'episode_id'}:
+                        require_media('podcasts')
                         row = podcast_review.review(bridge, payload['episode_id'])
                         self.store.finish(ident, result=dict(row,review_id=ident), private=row)
                     elif (kind == 'episode.approve' and set(payload) == {'review_id','digest','source','confirm'}
@@ -527,6 +595,7 @@ class Administration:
                         row = self.store.review(payload['review_id'], 'episode.preview')
                         if row['digest'] != payload['digest']:
                             raise podcast_review.ReviewError('Die Freigabe passt nicht zur angezeigten Prüfung.')
+                        require_media('podcasts')
                         podcast_review.review(bridge,row['episode_id'],record=row,source=payload['source'])
                         self.store.finish(ident, result={'approved':True})
                     else:
@@ -553,12 +622,14 @@ class Administration:
                 import manual_review
                 if kind == 'review.preview':
                     if set(payload) != {'abs_id'}: raise ValueError('Ungültiger Prüfauftrag')
+                    require_media('audiobooks')
                     record = manual_review.preview(bridge, payload['abs_id'])
                     self.store.finish(ident, result=public_review(ident, record), private=record)
                 elif kind == 'review.approve':
                     if set(payload) != {'review_id', 'digest', 'confirm'} or payload['confirm'] is not True:
                         raise ValueError('Die konkrete Dateifreigabe muss bestätigt werden')
                     record = self.store.review(payload['review_id'])
+                    require_media('audiobooks')
                     result = manual_review.approve(bridge, record, payload['digest'])
                     self.store.finish(ident, result=result)
         except Exception as exc:
@@ -571,7 +642,7 @@ class Administration:
         return True
 
     def publish(self, bridge, disabled_reason=None, busy=None):
-        if self.folders: atomic(self.store.control / 'folders-public.json', self.folders.public())
+        if self.folders: self.publish_changed('folders-public.json', self.folders.public())
         try: last = json.loads((self.root / 'last-run.json').read_text())
         except (OSError, ValueError): last = {}
         issues = list(last.get('blocked', []))
@@ -610,21 +681,23 @@ class Administration:
                     info = json.loads(detail)
                     recent.append({'at': at, 'book': book, 'kind': kind,
                         'detail': {k: info[k] for k in ('title', 'direction', 'seconds', 'status', 'reason', 'progress_unchanged') if k in info}})
-                atomic(self.store.control / 'sync-events.json', recent)
+                self.publish_changed('sync-events.json', recent)
             except Exception:
                 issues.append({'title': 'Zuordnungen', 'reason': 'Gespeicherte Zuordnungen konnten nicht vollständig gelesen werden'})
         ebooks = last.get('ebooks', {})
         for item in ebooks.get('blocked', []): issues.append(dict(item, type='ebook'))
         fatal = last.get('fatal')
         podcast_bad = podcasts['enabled'] and (not podcasts.get('at') or podcasts.get('blocked') or podcasts.get('fatal'))
-        self.store.publish({'paused': paused, 'last_cycle': last.get('at'), 'blocked': issues, 'books': rows,
+        self.publish_changed('status.json', {'paused': paused, 'last_cycle': last.get('at'), 'blocked': issues, 'books': rows,
             'summary': {'mapped': last.get('mapped', len(rows)), 'ebooks': ebooks.get('mapped', 0),
                 'blocked': len(issues), 'waiting': last.get('waiting', 0),
                 'healthy': not (issues or fatal or disabled_reason or paused or podcast_bad),
                 'podcasts_blocked': len(podcasts.get('blocked', [])) if podcasts['enabled'] else 0},
             'last_run': last, 'podcasts': podcasts, 'admin': {'paused': paused, 'reason': disabled_reason or fatal},
+            'io_metrics': {'folders': snapshot(self.folders), 'presentation': snapshot(self), 'media': snapshot(bridge)},
             'worker': {'busy': busy, 'at': stamp()},
-            'services': {}}, self.manager.public())
+            'services': {}}, heartbeat=60)
+        self.publish_changed('connections-public.json', self.manager.public())
 
 
 def connection_error(code):
@@ -658,6 +731,7 @@ def folder_error(code):
         'folder_not_in_allowed_mount': 'Dieser Ordner liegt außerhalb der freigegebenen Medienordner. Die Docker-Freigabe muss zuerst eingerichtet werden.',
         'folder_mount_unavailable': 'Die Medienfreigabe ist nicht eingehängt. Abgleich bleibt gesperrt.',
         'folder_unavailable': 'Der Ordner ist nicht vorhanden oder nicht lesbar.',
+        'folder_check_pending': 'Der Ordner wurde noch nicht geprüft. Bitte „Ordner prüfen“ ausführen.',
         'folder_symlink_or_not_directory': 'Bitte einen echten Medienordner ohne Verknüpfung auswählen.',
         'incompatible_folder_mapping': 'Die Ordner passen nicht zu den bestehenden Zuordnungen. Dateien werden nicht verschoben; zuerst die Freigaben der Anwendungen prüfen.',
     }.get(code, 'Ordneränderung nicht übernommen. Pfade und Freigaben prüfen.')
@@ -812,7 +886,10 @@ def run_admin_loop(args, root, config, credentials, bridge_type):
             if current != signature:
                 close_bridge(bridge); bridge = None
                 if not disabled or podcast_ready: bridge = bridge_type(root, cfg, creds)
-                if bridge is not None:bridge.serve_preview=serve_preview
+                if bridge is not None:
+                    bridge.serve_preview=serve_preview
+                    bridge.media_guard=admin.media_guard
+                    bridge.media_generation=admin.media_generation
                 signature = current; next_cycle = 0
             admin.publish(bridge, disabled)
             if admin.process_one(bridge):

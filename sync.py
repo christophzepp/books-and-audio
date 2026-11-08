@@ -128,6 +128,8 @@ class MappingPaused(RuntimeError):
 
 class Bridge:
     def __init__(self, directory, config, credentials, clock=time.time):
+        from io_policy import settings as io_settings
+        io_settings(config)
         self.root, self.config, self.clock = Path(directory), config, clock
         self.abs = ABSClient(config['abs_url'], credentials['abs_token'])
         self.provider = config.get('mapping_provider', 'bookorbit')

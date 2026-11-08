@@ -6,6 +6,7 @@ No HTML, JavaScript, external entities or network resources are executed.
 """
 import bisect
 import hashlib
+import io
 import math
 import posixpath
 import re
@@ -67,11 +68,23 @@ def text_nodes(node):
         elif child.nodeType==Node.ELEMENT_NODE: yield from text_nodes(child)
 
 class EpubLocations:
+    CACHE_VERSION = 'epubjs-0.3.93-1024-foliate-v1'
+
     def __init__(self, filename, expected_hash=None):
-        with open(filename,'rb') as f: self.hash=hashlib.sha256(f.read()).hexdigest()
+        with open(filename,'rb') as f: data=f.read()
+        self._from_bytes(data, expected_hash)
+
+    @classmethod
+    def from_bytes(cls, data, expected_hash=None):
+        value=cls.__new__(cls)
+        value._from_bytes(data, expected_hash)
+        return value
+
+    def _from_bytes(self, data, expected_hash):
+        self.hash=hashlib.sha256(data).hexdigest()
         if expected_hash and self.hash!=expected_hash: raise ValueError('EPUB file changed')
         self.locations=[];self.nodes=[];self.element_paths=set();self.sizes=[];self.section_lengths=[]
-        with zipfile.ZipFile(filename) as z:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
             if sum(i.file_size for i in z.infolist())>128*1024*1024: raise ValueError('EPUB exceeds safe indexing limit')
             def xml(name):
                 data=z.read(name)
@@ -117,6 +130,74 @@ class EpubLocations:
         self.total=len(self.locations)-1
         self.keys=[self.key(x[0]) for x in self.locations]
         if self.keys!=sorted(self.keys): raise ValueError('EPUB.js locations are not ordered for this EPUB')
+
+    def cache_data(self):
+        """Plain data only: loading an index never executes cached code."""
+        node_ids={id(node):index for index,node in enumerate(self.nodes)}
+        return dict(spine_step=self.spine_step, nodes=self.nodes,
+                    locations=[[[section,list(path),offset,node_ids[id(node)]]
+                                for section,path,offset,node in pair] for pair in self.locations],
+                    element_paths=[[section,list(path)] for section,path in sorted(self.element_paths)],
+                    sizes=self.sizes, section_lengths=self.section_lengths)
+
+    @classmethod
+    def from_cache_data(cls, data, expected_hash):
+        """Validate all cached references and dimensions before using positions."""
+        def number(value, minimum=0):
+            if type(value) is not int or not minimum<=value<=2**53:
+                raise ValueError('Invalid cached EPUB integer')
+            return value
+        def path(value):
+            if not isinstance(value,list) or not value or len(value)>1024:
+                raise ValueError('Invalid cached EPUB path')
+            return tuple(number(step,1) for step in value)
+        if not isinstance(data,dict) or set(data)!={'spine_step','nodes','locations','element_paths','sizes','section_lengths'}:
+            raise ValueError('Invalid cached EPUB fields')
+        value=cls.__new__(cls);value.hash=expected_hash
+        value.spine_step=number(data['spine_step'],2)
+        if value.spine_step%2:raise ValueError('Invalid cached EPUB spine')
+        for name in ('nodes','locations','element_paths','sizes','section_lengths'):
+            if not isinstance(data[name],list) or len(data[name])>1000000:
+                raise ValueError('Invalid cached EPUB collection')
+        value.sizes=[number(x) for x in data['sizes']]
+        value.section_lengths=[number(x) for x in data['section_lengths']]
+        if not value.sizes or len(value.sizes)!=len(value.section_lengths) or not sum(value.sizes):
+            raise ValueError('Invalid cached EPUB sections')
+        def section(index):
+            index=number(index)
+            if index>=len(value.sizes):raise ValueError('Invalid cached EPUB section')
+            return index
+        value.nodes=[]
+        for node in data['nodes']:
+            if not isinstance(node,dict) or set(node)!={'spine','jf','bo','offset','length','before'}:
+                raise ValueError('Invalid cached EPUB node')
+            row=dict(spine=section(node['spine']),jf=path(node['jf']),bo=path(node['bo']),
+                     offset=number(node['offset']),length=number(node['length']),before=number(node['before']))
+            if row['before']+row['length']>value.section_lengths[row['spine']]:
+                raise ValueError('Invalid cached EPUB text bounds')
+            value.nodes.append(row)
+        value.element_paths=set()
+        for item in data['element_paths']:
+            if not isinstance(item,list) or len(item)!=2:raise ValueError('Invalid cached EPUB element')
+            value.element_paths.add((section(item[0]),path(item[1])))
+        value.locations=[]
+        for pair in data['locations']:
+            if not isinstance(pair,list) or len(pair)!=2:raise ValueError('Invalid cached EPUB location')
+            points=[]
+            for point in pair:
+                if not isinstance(point,list) or len(point)!=4:raise ValueError('Invalid cached EPUB point')
+                index=number(point[3])
+                if index>=len(value.nodes):raise ValueError('Invalid cached EPUB node reference')
+                node=value.nodes[index];spine=section(point[0]);jp=path(point[1]);offset=number(point[2])
+                if spine!=node['spine'] or jp!=node['jf'] or offset>node['length']:
+                    raise ValueError('Invalid cached EPUB position bounds')
+                points.append((spine,jp,offset,node))
+            value.locations.append(tuple(points))
+        if len(value.locations)<2:raise ValueError('EPUB has insufficient locations')
+        value.total=len(value.locations)-1
+        value.keys=[value.key(x[0]) for x in value.locations]
+        if value.keys!=sorted(value.keys):raise ValueError('Invalid cached EPUB location order')
+        return value
 
     @staticmethod
     def key(point):

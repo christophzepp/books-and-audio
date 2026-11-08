@@ -83,7 +83,7 @@ class FolderTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         row = next(x for x in self.manager.public()['rows'] if x['id'] == result['folder_id'])
         self.assertFalse(row['active'])
-        self.assertEqual(row['check']['code'], 'folder_unavailable')
+        self.assertEqual(row['check']['code'], 'folder_check_pending')
         self.assertFalse((self.ebook / 'new').exists())
         self.assertEqual(row['paths']['server'], '/srv/example-media/ebooks/new')
 
@@ -122,6 +122,8 @@ class FolderTests(unittest.TestCase):
 
     def test_mount_loss_blocks_effective_and_test(self):
         self.available = False
+        with self.assertRaisesRegex(FolderManagerError, 'folder_mount_unavailable'):
+            self.manager.require('audiobooks')
         with self.assertRaisesRegex(FolderManagerError, 'folder_mount_unavailable'): self.manager.effective()
         result = self.mutate('test', id='audio')
         self.assertEqual(result['code'], 'folder_mount_unavailable')

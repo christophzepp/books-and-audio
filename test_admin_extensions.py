@@ -181,6 +181,7 @@ class AdministrationExtensions(fixtures.Fixture):
     def test_unmounted_root_blocks_effective_without_replacing_connections(self):
         before=self.admin.manager.path.read_bytes()
         self.admin.folders.mount_checker=lambda p:False
+        with self.assertRaises(ValueError): self.admin.media_guard('audiobooks')
         cfg,creds,disabled=self.admin.effective()
         self.assertTrue(disabled);self.assertEqual(self.admin.manager.path.read_bytes(),before)
         self.assertEqual(self.admin.manager.public()['mapping_provider'],'bookorbit')

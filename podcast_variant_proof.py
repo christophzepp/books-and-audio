@@ -270,6 +270,31 @@ class VariantProof:
         self._save(key,failed,apply)
         return refused(reason)
 
+    def _retry_deferred(self,mapping,stored,clock,native):
+        """Retain a negative retry decision without claiming fresh file proof.
+
+        Never used for cached readiness or admission. An expired cooldown and
+        every positive result still pass through the full local source guard.
+        No cache timestamps, measurement age or attempt budget are changed.
+        """
+        if (not finite(stored.get('next_attempt_at')) or stored['next_attempt_at']<=clock):return False
+        from pine_metadata_repair import api_source,same_api_source
+        binding=stored.get('binding')
+        source=binding.get('source') if isinstance(binding,dict) else None
+        if source is None:
+            seed=self.b.load('_pine_metadata:'+mapping['id'])
+            source=seed.get('source')
+        if not same_api_source(source,api_source(self.b,mapping,require_guid=True)):return False
+        cached=self._cache(stored,source,clock)
+        if cached is None and self._seed(mapping,source,clock) is None:return False
+        current=self.b.pinepods.inspect_episode_metadata(mapping['feed_url'],mapping['enclosure_url'],mapping['duration'])
+        account=dict(self.b.pinepods.identity);identity=native_binding(current,mapping,account)
+        old_account=self.b.load('_podcast_accounts').get('pinepods')
+        if old_account is not None and old_account!=account:raise ValueError('variant_account_changed')
+        if native is not None and native_binding(native,mapping,account)!=identity:
+            raise ValueError('variant_native_identity_changed')
+        return stored.get('source_fingerprint')==digest({'source':source,'native':identity})
+
     def inspect(self,mapping,*,native=None,refresh=False,apply=False):
         if type(refresh) is not bool or type(apply) is not bool:return refused('variant_invalid_mode')
         key=NAMESPACE+mapping['id'];clock=self.b.clock();attempted=False;cached=None;source_fingerprint=None
@@ -277,6 +302,10 @@ class VariantProof:
             if self.b.load('_pine_alias:'+mapping['id']) or mapping.get('_pine_alias_fingerprint'):
                 return refused('variant_alias_requires_review')
             if self._pending(mapping):return refused('variant_metadata_intent_pending')
+            if refresh and self._retry_deferred(mapping,self.b.load(key),clock,native):
+                from io_metrics import increment
+                increment(self.b,'podcast_variant_backoff_skips')
+                return refused('variant_refresh_backoff')
             source=self._source(mapping);stored=self.b.load(key);cached=self._cache(stored,source,clock)
             evidence=cached['evidence'] if cached else self._seed(mapping,source,clock)
             if evidence is None:return refused('variant_measured_evidence_required')

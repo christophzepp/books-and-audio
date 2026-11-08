@@ -21,6 +21,8 @@ import uuid
 
 NAMESPACE = '_pine_metadata:'
 FULL_PROBE_INTERVAL = 900
+SOURCE_MAPPING_KEYS = ('id', 'podcast_id', 'episode_id', 'abs_library', 'path', 'worker_path',
+                       'size', 'duration', 'mtime', 'fingerprint', 'feed_url', 'enclosure_url')
 
 
 def encoded(value):
@@ -29,6 +31,36 @@ def encoded(value):
 
 def digest(value):
     return hashlib.sha256(encoded(value).encode()).hexdigest()
+
+
+def api_source(bridge, mapping, *, require_guid=False):
+    """Current API identity only; never evidence that the media file is intact.
+
+    This is sufficient to retain a *negative* retry deferral. Positive proofs,
+    due probes and writes still obtain the complete local source below.
+    """
+    from podcast_sync import build_mapping, settings
+    cfg = settings(bridge)
+    if mapping.get('_pine_unavailable'):
+        raise ValueError('PinePods source identity is unavailable')
+    item = bridge.abs.item(mapping['podcast_id'])
+    episodes = item.get('media', {}).get('episodes')
+    if not isinstance(episodes, list):
+        raise ValueError('Incomplete Audiobookshelf source inventory')
+    matches = [row for row in episodes if isinstance(row, dict) and row.get('id') == mapping['episode_id']]
+    if len(matches) != 1:
+        raise ValueError('Audiobookshelf source identity changed')
+    fresh = build_mapping(item, matches[0], cfg)
+    if (fresh is None or any(fresh.get(key) != mapping.get(key) for key in SOURCE_MAPPING_KEYS)
+            or require_guid and fresh.get('abs_guid') != mapping.get('abs_guid')):
+        raise ValueError('Audiobookshelf source identity changed')
+    return dict(mapping={key: mapping[key] for key in SOURCE_MAPPING_KEYS},
+                jellyfin=copy.deepcopy(mapping.get('jf')))
+
+
+def same_api_source(source, current):
+    return (isinstance(source, dict) and source.get('mapping') == current['mapping']
+            and source.get('jellyfin') == current['jellyfin'])
 
 
 def result(outcome, reason, **fields):
@@ -182,22 +214,11 @@ class PineMetadataRepair:
                                  (key,)).fetchone() is not None for key in keys)
 
     def _source(self, mapping):
-        from podcast_sync import build_mapping, settings
+        from podcast_sync import settings
+        from io_metrics import increment
+        increment(self.b, 'podcast_metadata_source_checks')
+        current = api_source(self.b, mapping)
         cfg = settings(self.b)
-        if mapping.get('_pine_unavailable'):
-            raise ValueError('PinePods source identity is unavailable')
-        item = self.b.abs.item(mapping['podcast_id'])
-        episodes = item.get('media', {}).get('episodes')
-        if not isinstance(episodes, list):
-            raise ValueError('Incomplete Audiobookshelf source inventory')
-        matches = [row for row in episodes if isinstance(row, dict) and row.get('id') == mapping['episode_id']]
-        if len(matches) != 1:
-            raise ValueError('Audiobookshelf source identity changed')
-        fresh = build_mapping(item, matches[0], cfg)
-        keys = ('id', 'podcast_id', 'episode_id', 'abs_library', 'path', 'worker_path',
-                'size', 'duration', 'mtime', 'fingerprint', 'feed_url', 'enclosure_url')
-        if fresh is None or any(fresh.get(key) != mapping.get(key) for key in keys):
-            raise ValueError('Audiobookshelf source identity changed')
         worker = Path(mapping['worker_path'])
         root = Path(cfg['worker_root'])
         if (not worker.is_absolute() or not root.is_absolute() or worker.resolve() != worker
@@ -207,10 +228,10 @@ class PineMetadataRepair:
         if (not stat.S_ISREG(info.st_mode) or info.st_size != mapping['size']
                 or abs(info.st_mtime_ns / 1_000_000 - mapping['mtime']) > 2):
             raise ValueError('Podcast media file changed')
-        return dict(mapping={key: mapping[key] for key in keys},
+        return dict(mapping=current['mapping'],
                     file=dict(device=info.st_dev, inode=info.st_ino, size=info.st_size,
                               mtime_ns=info.st_mtime_ns, ctime_ns=info.st_ctime_ns),
-                    jellyfin=mapping.get('jf'))
+                    jellyfin=current['jellyfin'])
 
     def _persist(self, key, record, stage, reason):
         """State, immutable operation ID and sanitized event commit together.
@@ -296,9 +317,6 @@ class PineMetadataRepair:
         source = None
         self.current_full_probe_at = None
         try:
-            source = self._source(mapping)
-            if record.get('stage') == 'intent':
-                return self._recover(key, record, mapping, source)
             retry_at = record.get('next_probe_at', 0)
             full_at = record.get('last_full_probe_at')
             # Upgrade the old per-URL daily-budget deferral. A publisher can
@@ -308,8 +326,19 @@ class PineMetadataRepair:
                     and type(retry_at) in (int, float) and math.isfinite(retry_at)
                     and abs(retry_at - full_at - 86400) < .01):
                 retry_at = min(retry_at, full_at + FULL_PROBE_INTERVAL)
-            if (record.get('source') == source and retry_at > self.b.clock()):
+            # A cooldown cannot authorize a repair or renew any evidence.
+            # Preserve that negative decision without waking unchanged media.
+            # An intent must always use the full local source for readback.
+            if (record.get('stage') != 'intent'
+                    and type(retry_at) in (int, float) and math.isfinite(retry_at)
+                    and retry_at > self.b.clock()
+                    and same_api_source(record.get('source'), api_source(self.b, mapping))):
+                from io_metrics import increment
+                increment(self.b, 'podcast_metadata_backoff_skips')
                 return result('waiting', 'metadata_probe_backoff')
+            source = self._source(mapping)
+            if record.get('stage') == 'intent':
+                return self._recover(key, record, mapping, source)
             self.remaining -= 1
             before = self.b.pinepods.inspect_episode_metadata(mapping['feed_url'], mapping['enclosure_url'], mapping['duration'])
             if before['duration'] > 0 and abs(before['duration'] - mapping['duration']) <= 2:
