@@ -4,7 +4,8 @@ import math
 
 
 DEFAULTS = {
-    'ebook_cache_max_bytes': 64 * 1024 * 1024,
+    'ebook_cache_max_bytes': 1024 * 1024 * 1024,
+    'ebook_cache_max_entries': 4096,
     'ebook_verify_interval_seconds': 0,
     'ebook_discovery_interval_seconds': 300,
     'ebook_candidate_stable_seconds': 60,
@@ -19,7 +20,8 @@ def settings(config):
         raise ValueError('Invalid media I/O policy')
     result = dict(DEFAULTS, **policy)
     limits = {
-        'ebook_cache_max_bytes': (1024 * 1024, 512 * 1024 * 1024),
+        'ebook_cache_max_bytes': (1024 * 1024, 16 * 1024 * 1024 * 1024),
+        'ebook_cache_max_entries': (1, 100000),
         'ebook_discovery_interval_seconds': (60, 86400),
         'ebook_candidate_stable_seconds': (60, 86400),
     }

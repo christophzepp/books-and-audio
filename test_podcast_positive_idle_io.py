@@ -1,4 +1,4 @@
-"""Idle podcast observations skip media stats; writes retain fresh source guards."""
+"""Historical media proofs support observation and current API-authorized writes."""
 import copy
 import json
 import os
@@ -148,7 +148,7 @@ class PositiveIdleIOTests(unittest.TestCase):
         replacement.write_bytes(b'b'*old.st_size);os.utime(replacement,ns=(old.st_atime_ns,old.st_mtime_ns))
         replacement.replace(target)
 
-    def test_hidden_replacement_may_wait_while_idle_but_is_refused_before_refresh_or_write(self):
+    def test_hidden_replacement_is_detected_by_explicit_physical_refresh(self):
         self.warm();self.replace_preserving_reported_size_and_mtime()
         self.assertTrue(self.inspect()['ready'])  # No API change; observation alone writes no progress.
         self.assertFalse(self.inspect(force_source=True)['ready'])
@@ -208,17 +208,17 @@ class ForcedSourceCallTests(unittest.TestCase):
     advance=_fixtures.advance
     settle_all=_fixtures.settle_all
 
-    def test_each_status_write_requests_an_uncached_local_pin(self):
+    def test_each_status_write_requests_current_api_authorization(self):
         self.setup_variant();self.okay(self.cycle());self.abs.set(200,True)
         original=PodcastCoordinator.variant_proof;calls=[]
         def watched(c,mapping,**kwargs):
             calls.append(dict(kwargs));return original(c,mapping,**kwargs)
         with patch.object(PodcastCoordinator,'variant_proof',watched):self.settle_all()
-        pins=[call for call in calls if call.get('force_source') and call.get('apply') is False]
+        pins=[call for call in calls if call.get('authorize') and call.get('apply') is False]
         writes=len(self.abs.writes)+len(self.jf.writes)+len(self.pine.writes)
         self.assertGreater(writes,0)
         row=self.db.execute('SELECT value FROM operations WHERE book=?',(state_key('_podcast:show:episode'),)).fetchone()
-        self.assertIsNotNone(row);self.assertEqual(len(pins),len(json.loads(row[0])['plan']))
+        self.assertIsNotNone(row);self.assertGreaterEqual(len(pins),len(json.loads(row[0])['plan']))
         self.assertTrue(all(call.get('refresh') is False for call in pins))
 
     def test_completed_plan_recovery_rechecks_source_without_replaying_writes(self):
@@ -241,7 +241,7 @@ class ForcedSourceCallTests(unittest.TestCase):
         def watched(c,mapping,**kwargs):
             calls.append(dict(kwargs));return original(c,mapping,**kwargs)
         with patch.object(PodcastCoordinator,'variant_proof',watched):self.okay(self.cycle())
-        self.assertTrue(calls[0]['force_source'])
+        self.assertTrue(calls[0]['authorize'])
         self.assertFalse(self.load(key).get('pending'))
         self.assertEqual([self.abs.writes,self.jf.writes,self.pine.writes],writes)
 

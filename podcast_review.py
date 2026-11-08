@@ -3,7 +3,7 @@ import math
 
 from podcast_status_sync import StatusCoordinator, state_key, version_receipt
 from podcast_sync import PodcastCoordinator, encode, fingerprint, guard, has_pine_history, same
-from podcast_variant_proof import VariantProof, native_binding
+from podcast_variant_proof import VariantProof, native_binding, authorize_transfer, current_media_guard
 
 
 PREFIX = '_pine_transition:'
@@ -13,22 +13,24 @@ class ReviewError(ValueError):
     """Only static, user-facing diagnostics belong here."""
 
 
-def reported_proof(c, mapping, *, refresh=True, force_source=False):
+def reported_proof(c, mapping, *, refresh=True, force_source=False, authorize=False):
     # A human can explicitly accept the current personal catalog duration. Pin
     # the same file, account, URLs, and native IDs on every subsequent read.
+    if authorize:current_media_guard(c.b)
     checker = VariantProof(c.b)
     native = c.pine.inspect_episode_metadata(mapping['feed_url'], mapping['enclosure_url'], mapping['duration'])
     identity = native_binding(native, mapping, c.pine.identity)
-    source = checker.source_snapshot(mapping, allow_cached=not refresh and not force_source, identity=identity)
+    source = checker.source_snapshot(mapping, allow_cached=not refresh and not force_source, identity=identity, require_cached=authorize and not refresh and not force_source)
     duration = native['duration']
     if (type(duration) not in (float, int) or not math.isfinite(duration) or not 1 <= duration <= 172800
             or abs(duration - mapping['duration']) <= 2):
         raise ReviewError('PinePods meldet keine verwendbare abweichende Laufzeit.')
     binding = fingerprint([source, identity])
     version = fingerprint([binding, duration])
-    return dict(ready=True, fresh=refresh, validated_at=c.b.clock(), source_fingerprint=binding,
+    result=dict(ready=True, fresh=refresh, validated_at=c.b.clock(), source_fingerprint=binding,
                 proof_fingerprint=version, evidence_sha256=version, own_duration=duration,
                 **{k: identity[k] for k in ('feed_url', 'enclosure_url', 'native_episode_id', 'native_user_id')})
+    return authorize_transfer(result,c.b.clock()) if authorize else result
 
 
 def check_pending(bridge, key):

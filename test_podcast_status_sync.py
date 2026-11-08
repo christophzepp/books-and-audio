@@ -55,11 +55,15 @@ class StatusTests(unittest.TestCase):
         self.proof=dict(ready=True,fresh=True,validated_at=self.clock,own_duration=600,source_fingerprint='source',
             proof_fingerprint='proof',evidence_sha256='e'*64,feed_url='https://example.org/feed',enclosure_url='https://example.org/episode.mp3',
             native_episode_id=9,native_user_id=7)
-        def proof(coordinator,mapping,refresh=False,apply=False,force_source=False):
-            if refresh and getattr(self,'next_proof',None):
+        def proof(coordinator,mapping,refresh=False,apply=False,force_source=False,authorize=False):
+            if (refresh or authorize) and getattr(self,'next_proof',None):
                 self.proof.update(self.next_proof);self.next_proof=None
             value=copy.deepcopy(self.proof);value['validated_at']=getattr(self,'fixed_proof_time',self.clock)
             if refresh:value['fresh']=True
+            if authorize:
+                from podcast_variant_proof import authorize_transfer
+                value['fresh']=False
+                value=authorize_transfer(value,self.clock)
             if value['ready']:mapping['_variant_proof']=value
             return value
         self.addCleanup(patch.stopall)
@@ -272,9 +276,9 @@ class StatusTests(unittest.TestCase):
     def test_refresh_raw_change_never_disappears_behind_version_change(self):
         self.setup_variant();self.okay(self.cycle());self.proof['fresh']=False
         original=PodcastCoordinator.variant_proof
-        def changed(c,mapping,refresh=False,apply=False,force_source=False):
-            result=original(c,mapping,refresh=refresh,apply=apply,force_source=force_source)
-            if refresh:self.pine.position=20
+        def changed(c,mapping,refresh=False,apply=False,force_source=False,authorize=False):
+            result=original(c,mapping,refresh=refresh,apply=apply,force_source=force_source,authorize=authorize)
+            if authorize:self.pine.position=20
             return result
         self.next_proof={'own_duration':650,'proof_fingerprint':'new-version'};self.abs.set(200)
         with patch.object(PodcastCoordinator,'variant_proof',changed):r=self.cycle()
@@ -295,9 +299,9 @@ class StatusTests(unittest.TestCase):
     def test_actual_native_metadata_change_is_not_masked_by_duration_renewal(self):
         self.setup_variant();self.okay(self.cycle());self.proof['fresh']=False
         original=PodcastCoordinator.variant_proof
-        def changed(c,mapping,refresh=False,apply=False,force_source=False):
-            result=original(c,mapping,refresh=refresh,apply=apply,force_source=force_source)
-            if refresh:self.pine.observed_meta=1
+        def changed(c,mapping,refresh=False,apply=False,force_source=False,authorize=False):
+            result=original(c,mapping,refresh=refresh,apply=apply,force_source=force_source,authorize=authorize)
+            if authorize:self.pine.observed_meta=1
             return result
         self.next_proof={'own_duration':650,'proof_fingerprint':'new-version'};self.abs.set(200)
         with patch.object(PodcastCoordinator,'variant_proof',changed):r=self.cycle()
@@ -317,9 +321,9 @@ class StatusTests(unittest.TestCase):
         self.assertTrue(saved['pending']);original=copy.deepcopy(saved['pending']['media_receipt'])
         self.fixed_proof_time=original['validated_at'];self.proof['fresh']=False;self.advance(60)
         prior=PodcastCoordinator.variant_proof
-        def no_refetch(c,mapping,refresh=False,apply=False,force_source=False):
+        def no_refetch(c,mapping,refresh=False,apply=False,force_source=False,authorize=False):
             if refresh:self.fail('Unexpired original journal receipt must not trigger another audio fetch')
-            return prior(c,mapping,refresh=refresh,apply=apply,force_source=force_source)
+            return prior(c,mapping,refresh=refresh,apply=apply,force_source=force_source,authorize=authorize)
         with patch.object(PodcastCoordinator,'variant_proof',no_refetch):self.okay(self.cycle())
         self.assertTrue(self.pine.completed);self.assertFalse(self.load(key).get('pending'))
         import json
@@ -332,15 +336,15 @@ class StatusTests(unittest.TestCase):
         self.next_proof={'own_duration':650,'proof_fingerprint':'new-version'};self.advance(151)
         count=len(self.pine.writes);self.assertTrue(self.cycle()['blocked'])
         self.assertEqual(len(self.pine.writes),count);self.assertEqual(self.load(key)['pending'],original)
-    def test_changed_receipt_cannot_use_original_freshness_without_new_probe(self):
+    def test_same_version_renewed_receipt_uses_fresh_api_authorization_without_new_probe(self):
         self.setup_variant();self.okay(self.cycle());self.abs.set(200,True);self.okay(self.cycle())
         self.proof.update(fresh=False,evidence_sha256='f'*64);self.advance(60)
         prior=PodcastCoordinator.variant_proof;refreshes=[]
-        def counted(c,mapping,refresh=False,apply=False,force_source=False):
+        def counted(c,mapping,refresh=False,apply=False,force_source=False,authorize=False):
             if refresh:refreshes.append(True)
-            return prior(c,mapping,refresh=refresh,apply=apply,force_source=force_source)
+            return prior(c,mapping,refresh=refresh,apply=apply,force_source=force_source,authorize=authorize)
         with patch.object(PodcastCoordinator,'variant_proof',counted):self.okay(self.cycle())
-        self.assertEqual(len(refreshes),1)
+        self.assertEqual(len(refreshes),0)
 
     def test_proven_variant_precedes_matching_rss_full_read_and_metadata_repair(self):
         self.setup_variant()

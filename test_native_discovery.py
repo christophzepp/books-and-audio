@@ -235,11 +235,14 @@ class NativeEnrollmentTests(unittest.TestCase):
         self.assertEqual(self.cycle()['waiting'], 1)
         self.assertEqual(self.count('native_readalong_enrollments'), 0)
 
-    def test_metadata_only_version_change_keeps_verified_content_and_direct_apply(self):
+    def test_metadata_version_change_requires_preparation_before_direct_apply(self):
         self.accept()
         self.abs.set(25)
         pair, raw = self.bridge.read_pair(self.mapping)
         self.bo.bd['files'][1]['contentVersion'] = '2026-10-31T01:00:30.000Z'
+        with self.assertRaises(native_discovery.NativeMediaVerificationRequired):
+            self.bridge.apply(self.mapping,pair,raw,'abs_to_bo',self.initial_state['baseline'])
+        self.bridge.prepare_native_readalong(self.mapping,True)
         result = self.bridge.apply(self.mapping, pair, raw, 'abs_to_bo', self.initial_state['baseline'])
         self.assertEqual(result['bo']['position'], 25)
         proof = json.loads(self.bridge.db.execute('SELECT proof FROM native_readalong_enrollments').fetchone()[0])

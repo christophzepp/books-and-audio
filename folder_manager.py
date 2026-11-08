@@ -380,13 +380,16 @@ class FolderManager:
             fail('invalid_folder_kind')
         state, _ = self._read()
         kinds = [kind] if kind is not None else sorted(KINDS)
+        return self._observation_generation(state, kinds, context=context)
+
+    def _observation_generation(self, state, kinds, *, context=None, scopes=None):
         values = []
         for selected in kinds:
             rows = [row for row in state['rows'] if row['active'] and row['kind'] == selected]
             if not rows:
                 values.append([selected, []])
                 continue
-            mount = self._mount_scope(selected, rows)
+            mount = scopes[selected] if scopes is not None else self._mount_scope(selected, rows)
             if mount is None:
                 fail('folder_generation_unavailable')
             roots = [root for root in self.access_roots if any(
@@ -464,6 +467,48 @@ class FolderManager:
             if check['ok'] is not True:
                 fail(check['code'])
         return True
+
+    def require_observation(self, kind, *, context=None):
+        """Validate existing folder evidence without accessing any media path.
+
+        The caller separately validates the fresh host deployment receipt and
+        application identities. This guard checks the current kernel mount and
+        exact aliases against a positive private NVMe witness. Missing, failed
+        or changed evidence requires a targeted physical check; it never falls
+        back to refresh(), check(), ismount() or a filesystem traversal here.
+        """
+        if kind not in KINDS:
+            fail('invalid_folder_kind')
+        state, _ = self._read()
+        rows = [row for row in state['rows'] if row['active'] and row['kind'] == kind]
+        if not rows:
+            fail('folder_mapping_missing')
+        mount = self._mount_scope(kind, rows)
+        if mount is None:
+            fail('folder_generation_unavailable')
+        for row in rows:
+            paths = self._with_server(row['paths'])
+            roots = [root for root in self.access_roots
+                     if _under(paths['worker'], root['worker']) is not None]
+            if len(roots) != 1:
+                fail('folder_verification_required')
+            previous = self._checks.get(self._signature(row))
+            if previous is not None and previous.get('check', {}).get('ok') is not True:
+                fail('folder_verification_required')
+            binding = self._local_binding(row, mount)
+            saved = self.observations.get('folders', row['id'], binding)
+            if (not isinstance(saved, dict) or set(saved) != {'check', 'identity'}
+                    or saved.get('check') != {'ok': True, 'code': 'folder_checked'}
+                    or saved['check']['ok'] is not True
+                    or not isinstance(saved.get('identity'), dict)
+                    or set(saved['identity']) != {'device', 'inode'}
+                    or any(type(value) is not int or value < 0
+                           for value in saved['identity'].values())):
+                fail('folder_verification_required')
+        generation = self._observation_generation(state, [kind], context=context,
+                                                   scopes={kind: mount})
+        increment(self, 'folder_observation_guards')
+        return generation
 
     def _with_server(self, paths):
         result = _paths(paths)

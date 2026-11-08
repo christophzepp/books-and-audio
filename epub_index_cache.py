@@ -1,7 +1,8 @@
-"""Disposable, bounded EPUB indexes; source-byte verification stays mandatory.
+"""Disposable, bounded EPUB indexes with explicit physical/history entry points.
 
 The directory belongs on the coordinator's SSD state volume, never its media
-mount. A cached index is an optimisation, not permission to write progress.
+mount. A cached index is derived data, not a current physical-file verification.
+The coordinator separately binds historical evidence to current API identities.
 """
 import hashlib
 import json
@@ -15,8 +16,8 @@ from io_metrics import increment
 
 
 MAX_INDEX_BYTES = 32 * 1024 * 1024
-MAX_DISK_BYTES = 64 * 1024 * 1024
-MAX_DISK_ENTRIES = 64
+MAX_DISK_BYTES = 1024 * 1024 * 1024
+MAX_DISK_ENTRIES = 4096
 MAX_MEMORY_ENTRIES = 4
 
 
@@ -62,9 +63,15 @@ def verified_bytes(path, expected_hash, expected_size, owner=None):
 
 
 class EpubIndexCache:
-    def __init__(self, directory=None, max_bytes=MAX_DISK_BYTES, owner=None):
+    def __init__(self, directory=None, max_bytes=MAX_DISK_BYTES, owner=None,
+                 max_entries=MAX_DISK_ENTRIES):
+        if type(max_bytes) is not int or not 1<=max_bytes<=16*1024*1024*1024:
+            raise ValueError('Invalid EPUB index cache byte limit')
+        if type(max_entries) is not int or not 1<=max_entries<=100000:
+            raise ValueError('Invalid EPUB index cache entry limit')
         self.directory=Path(directory) if directory is not None else None
         self.max_bytes=max_bytes
+        self.max_entries=max_entries
         self.owner=owner
         self.memory={}
 
@@ -131,12 +138,14 @@ class EpubIndexCache:
         used=0
         for number,(_,size,item) in enumerate(entries):
             used+=size
-            if number>=MAX_DISK_ENTRIES or used>self.max_bytes:item.unlink(missing_ok=True)
+            if number>=self.max_entries or used>self.max_bytes:item.unlink(missing_ok=True)
 
-    def get(self, path, expected_hash, expected_size):
-        # Even a RAM hit verifies the current original. Idle cycles do not call
-        # this method at all; changed/proposed transfers cannot trust old bytes.
-        data=verified_bytes(path,expected_hash,expected_size,self.owner)
+    def cached(self, expected_hash):
+        """Load only validated SSD data, without inspecting any media path.
+
+        This does not establish current source bytes. Callers must separately
+        validate the historical proof and current logical source identity.
+        """
         key=self._key(expected_hash)
         index=self.memory.get(key)
         if index is not None and self.owner is not None:increment(self.owner,'ebook_index_ram_hits')
@@ -144,13 +153,36 @@ class EpubIndexCache:
             try:index=self._load(key,expected_hash)
             except (OSError,ValueError,TypeError,KeyError,RecursionError):index=None
             if index is not None and self.owner is not None:increment(self.owner,'ebook_index_disk_hits')
+        if index is not None:self._remember(key,index)
+        return index
+
+    def _remember(self,key,index):
+        self.memory.pop(key,None);self.memory[key]=index
+        while len(self.memory)>MAX_MEMORY_ENTRIES:self.memory.pop(next(iter(self.memory)))
+
+    def forget(self,expected_hash):
+        """Revoke derived evidence after a failed explicit physical check."""
+        key=self._key(expected_hash)
+        self.memory.pop(key,None)
+        try:
+            directory=self._directory()
+            if directory is not None:(directory/(key+'.json')).unlink(missing_ok=True)
+        except (OSError,ValueError):pass
+
+    def get(self, path, expected_hash, expected_size):
+        """Explicit physical validation; even a RAM hit hashes the original."""
+        try:data=verified_bytes(path,expected_hash,expected_size,self.owner)
+        except (OSError,ValueError):
+            self.forget(expected_hash)
+            raise
+        key=self._key(expected_hash)
+        index=self.cached(expected_hash)
         if index is None:
             index=EpubLocations.from_bytes(data,expected_hash)
             if self.owner is not None:increment(self.owner,'ebook_index_builds')
             try:self._store(key,expected_hash,index)
             except (OSError,ValueError,TypeError):pass  # Disposable cache failure never authorises a write.
-        self.memory.pop(key,None);self.memory[key]=index
-        while len(self.memory)>MAX_MEMORY_ENTRIES:self.memory.pop(next(iter(self.memory)))
+        self._remember(key,index)
         return index
 
     def seed(self, index):

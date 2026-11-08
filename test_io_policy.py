@@ -11,15 +11,25 @@ class IOPolicyTests(unittest.TestCase):
         self.assertFalse(integrity_due({}, 1000, None))
         self.assertEqual(settings({})['folder_validation_interval_seconds'], 0)
         self.assertEqual(settings({})['ebook_discovery_interval_seconds'], 300)
+        self.assertEqual(settings({})['ebook_cache_max_bytes'], 1024**3)
+        self.assertEqual(settings({})['ebook_cache_max_entries'], 4096)
 
     def test_invalid_configuration_does_not_silently_relax_checks(self):
         for value in ([], None, {'unknown': 1}, {'ebook_cache_max_bytes': True},
+                      {'ebook_cache_max_bytes': 16*1024**3+1},
+                      {'ebook_cache_max_entries': True}, {'ebook_cache_max_entries': 0},
+                      {'ebook_cache_max_entries': 100001},
                       {'folder_validation_interval_seconds': 1},
                       {'ebook_verify_interval_seconds': float('nan')},
                       {'ebook_candidate_stable_seconds': 1},
                       {'integrity_window_utc': {'start_hour': 3, 'end_hour': 3}}):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 settings({'io_policy': value})
+
+    def test_large_explicit_nvme_cache_budget_is_bounded_and_supported(self):
+        result=settings({'io_policy':dict(ebook_cache_max_bytes=16*1024**3,ebook_cache_max_entries=100000)})
+        self.assertEqual(result['ebook_cache_max_bytes'],16*1024**3)
+        self.assertEqual(result['ebook_cache_max_entries'],100000)
 
     def test_due_and_clock_rollback(self):
         cfg = {'io_policy': {'ebook_verify_interval_seconds': 600}}

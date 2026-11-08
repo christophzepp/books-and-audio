@@ -25,19 +25,20 @@ Die Vorschau aus der README benötigt keine anderen Dienste. Ein vollständiger 
 
 ## Medienzugriffe ab Beta 9
 
-Fortschrittsabgleich, Bibliothekserkennung und Dateiprüfung haben getrennte Abläufe. Unveränderte, bereits bestätigte E-Book-Stände werden nach Prüfung der aktuellen API- und Mountidentität ohne Öffnen der EPUB übernommen. Ein offenes Übertragungsjournal, geänderte Stände oder Identitäten und eine fällige zusätzliche Integritätsprüfung verwenden diesen schnellen Rückweg nicht. Vor echten Übertragungen werden die Originalbytes weiterhin vollständig geprüft; eine Änderung während der letzten Anfrage verhindert den Abschluss des Journals.
+Fortschrittsabgleich, Bibliothekserkennung und Dateiprüfung haben getrennte Abläufe. Unveränderte, bereits bestätigte E-Book-Stände werden nach Prüfung der aktuellen API- und Mountidentität ohne Öffnen der EPUB übernommen. Seit Beta 12 benötigen auch geänderte Lesestände und offene Übertragungsjournale bei unveränderter API-Dateiversion keine erneute Inhaltsprüfung. Aktuelle API-Identitäten und Fortschritte werden vor und nach Schreibvorgängen verglichen; eine konkurrierende Änderung verhindert den Abschluss des Journals.
 
-Der Positionsindex liegt als versionsgebundene JSON-Datei unter `state/ebook-index-cache`, mit maximal 64 MiB und 64 Dateien sowie einem kleinen RAM-Cache. Das gesamte `state`-Verzeichnis sollte auf einer SSD liegen. Es wird keine Kopie der Mediendatei angelegt. Fehlende oder beschädigte Indizes werden aus aktuell geprüften Originalbytes neu erstellt; ein Cachetreffer ersetzt keine Dateiprüfung für eine Übertragung. Die Cachedateien sind abgeleitete Daten, die Datenbank und Übertragungsjournale bleiben dagegen unverzichtbar.
+Der Positionsindex liegt als versionsgebundene JSON-Datei unter `state/ebook-index-cache`, standardmäßig mit maximal 1 GiB und 4.096 Dateien sowie einem RAM-Cache für vier Indizes. Das gesamte `state`-Verzeichnis sollte auf einer SSD liegen. Es wird keine Kopie der Mediendatei angelegt. Fehlende oder beschädigte Indizes werden aus aktuell geprüften Originalbytes neu erstellt; bei unveränderter API-Dateiversion genügt der historische Dateinachweis auch für eine Fortschrittsübertragung. Die Cachedateien sind abgeleitete Daten, die Datenbank und Übertragungsjournale bleiben dagegen unverzichtbar.
 
 Seit Beta 11 werden Medienordner gemeinsam geprüft und im unveränderten Leerlauf dauerhaft wiederverwendet. Vor tatsächlichen E-Book-Dateioperationen und manuellen Medienprüfungen wird der betroffene Ordnertyp erneut sicher geöffnet. Mount-, relevante Deployment- oder Konfigurationsänderungen entwerten den Prüfstand. Die GUI selbst löst keine Ordnerdurchläufe aus; unveränderte Darstellungsdateien werden nicht ständig neu geschrieben. Der Worker-Lebensnachweis wird weiterhin spätestens alle 60 Sekunden veröffentlicht. Die 150-Sekunden-Grenze für echte Deploymentnachweise bleibt bestehen.
 
-Neue EPUB-Kandidaten werden zunächst anhand von Datei- und API-Metadaten beobachtet. Erst nach mindestens 60 stabilen Sekunden wird der Inhalt vollständig gelesen und indiziert. Bei Podcasts werden gültige negative Wartefristen vor lokalen Pfadprüfungen ausgewertet. Positive Bereitschaft, fällige Audioprobes und echte Änderungen prüfen die lokalen Dateien weiterhin; Werbevarianten und Messnachweise behalten ihre bisherigen Gültigkeitsgrenzen.
+Neue EPUB-Kandidaten werden zunächst anhand von Datei- und API-Metadaten beobachtet. Erst nach mindestens 60 stabilen Sekunden wird der Inhalt vollständig gelesen und indiziert. Bei Podcasts werden gültige negative Wartefristen vor lokalen Pfadprüfungen ausgewertet. Bereits bestätigte Podcast-Dateien und Audiofassungen verwenden ihre gebundenen Nachweise auch bei Statusänderungen. Neue oder laut API geänderte Medien sowie ausdrücklich angeforderte Audioprobes prüfen nur die betroffenen Dateien.
 
 Optionale Einstellungen im bestehenden `config/config.json` (nur den Abschnitt ergänzen; die übrige Konfiguration erhalten):
 
 ```json
 "io_policy": {
-  "ebook_cache_max_bytes": 67108864,
+  "ebook_cache_max_bytes": 1073741824,
+  "ebook_cache_max_entries": 4096,
   "ebook_verify_interval_seconds": 0,
   "ebook_discovery_interval_seconds": 300,
   "ebook_candidate_stable_seconds": 60,
@@ -46,7 +47,7 @@ Optionale Einstellungen im bestehenden `config/config.json` (nur den Abschnitt e
 }
 ```
 
-`ebook_verify_interval_seconds: 0` bedeutet, dass es keine zusätzlichen regelmäßigen Inhaltsvollprüfungen gibt. Erstaufnahme, echte Änderungen, offene Journale und Übertragungen werden trotzdem geprüft. Für zusätzliche Hintergrundprüfungen kann ein Intervall ab 60 Sekunden und optional ein UTC-Stundenfenster, etwa `{"start_hour": 1, "end_hour": 3}`, gewählt werden. Das Fenster begrenzt ausschließlich zusätzliche Hintergrundprüfungen, niemals die nötige Prüfung vor einer Übertragung. Ohne Medienbedarf kann eine externe Dateiänderung daher bis zur nächsten tatsächlichen Verwendung oder optionalen Integritätsprüfung unbemerkt bleiben; sie darf keinen ungeprüften Fortschrittstransfer auslösen.
+`ebook_verify_interval_seconds: 0` bedeutet, dass es keine zusätzlichen regelmäßigen Inhaltsvollprüfungen gibt. Erstaufnahme und laut API geänderte Medien werden trotzdem physisch geprüft. Reine Fortschrittsänderungen und die Wiederaufnahme offener Journale verwenden aktuelle API-Prüfungen gegen vorhandene Nachweise. Für zusätzliche Hintergrundprüfungen kann ein Intervall ab 60 Sekunden und optional ein UTC-Stundenfenster, etwa `{"start_hour": 1, "end_hour": 3}`, gewählt werden. Das Fenster begrenzt ausschließlich zusätzliche Hintergrundprüfungen. Ein Dateiaustausch außerhalb der Mediendienste bei unveränderten API-Metadaten kann bis zu einer manuellen oder optionalen Integritätsprüfung unbemerkt bleiben; ein reiner Fortschrittstransfer löst keine erneute Inhaltsprüfung aus.
 
 Unter `io_metrics` in `state/control/status.json` stehen Zähler für Inhaltslesungen und gelesene Bytes, Indexaufbauten und Cachetreffer, übersprungene E-Book-Abgleiche, Ordnerprüfungen und ausgelassene GUI-Schreibvorgänge. Sie zählen seit Erstellung der jeweiligen Worker-/Verwaltungsinstanz und werden nur im RAM geführt. Sie messen Programmoperationen, keine physischen Plattenzugriffe. Für die Abnahme im Livebetrieb zusätzlich den vorhandenen Festplattenwächter und Block-I/O-Zähler vergleichen, einschließlich indirekter Last durch API-Aufrufe bei den Originaldiensten. Scrub und andere Wartungsarbeiten getrennt auswerten.
 
@@ -62,7 +63,7 @@ Das private `state`-Verzeichnis muss auf der NVMe/SSD liegen. Unter `state/media
 
 Unveränderte positive Nachweise haben **keine zeitliche Ablaufgrenze**. Sie überstehen Containerneustarts. Ein neuer Podcast löst nur Prüfungen seiner eigenen Dateien aus. Aktuelle API-Quellmetadaten, Folgen-/Dateiidentitäten, das persönliche Konto und die relevante Mountgeneration müssen zum gespeicherten Nachweis passen. Fremde Ordneränderungen oder Darstellungsnamen entwerten nicht den ganzen Bestand. Ein tatsächlicher Mountwechsel, eine Dateiänderung laut API, ein fehlender/beschädigter Eintrag oder eine fehlgeschlagene manuelle Prüfung betrifft den jeweiligen Nachweis. Ein Host-Neustart kann eine neue Mountprüfung benötigen.
 
-`folder_validation_interval_seconds: 0` und `ebook_verify_interval_seconds: 0` deaktivieren zusätzliche regelmäßige physische Prüfungen. Bereits ausdrücklich konfigurierte positive Intervalle bleiben erhalten; für dauerhafte Wiederverwendung diese Werte auf `0` setzen. Manuelle Prüfungen und echte Übertragungen bleiben aktuell geprüft. Wird eine Datei außerhalb der Mediendienste bei unveränderten API-Daten ersetzt, erkennt die unveränderte Beobachtung das erst bei einer solchen Verwendung oder zusätzlichen Integritätsprüfung. Ein historischer Cachetreffer darf keinen ungeprüften Transfer freigeben.
+`folder_validation_interval_seconds: 0` und `ebook_verify_interval_seconds: 0` deaktivieren zusätzliche regelmäßige physische Prüfungen. Bereits ausdrücklich konfigurierte positive Intervalle bleiben erhalten; für dauerhafte Wiederverwendung diese Werte auf `0` setzen. Manuelle Prüfungen lesen weiterhin die Originaldatei. Fortschrittsübertragungen prüfen seit Beta 12 aktuelle APIs gegen die historischen Mediennachweise. Wird eine Datei außerhalb der Mediendienste bei unveränderten API-Daten ersetzt, erkennt der Dienst dies erst bei einer manuellen oder zusätzlichen Integritätsprüfung. Historische Nachweise allein erteilen keine Schreibberechtigung; aktuelle Konten, Dateiversionen und Konfliktprüfungen müssen weiterhin passen.
 
 Pro Durchlauf werden schreibgeschützte API-Sammelabfragen und Indizes aufgebaut. ABS liefert persönliche Hörstände einmal und jede Podcastserie einmal; PinePods liefert seine paginierten persönlichen Kataloge und GPodder-Aktionen je Feed; Jellyfin liefert den betreffenden Bibliotheksbestand. PinePods-Sammelmetadaten werden je Feed gegen eine vollständige native Antwort abgeglichen. Abweichende Formate verwenden einzelne geprüfte Abfragen. Neue Durchläufe lesen neue Hörstände, sodass Zurücksetzen und Weiterhören erkennbar bleiben. Nach Schreibvorgängen werden die Beobachtungssnapshots verworfen. Frische Kontoprüfung, CAS, Übertragungsrücklesen und Wiederaufnahme verwenden die Originalclients.
 
@@ -72,4 +73,20 @@ Gezielte Regressionen:
 
 ```sh
 python -m unittest test_podcast_durable_io test_folder_durable_io test_ebook_standby test_native_durable_io test_podcast_bulk_io
+```
+
+## Fortschrittsübertragungen ab Beta 12
+
+Der physische Mediennachweis und die aktuelle Übertragungsprüfung sind getrennt. Ein gültiger Nachweis behält seinen ursprünglichen Prüfzeitpunkt. Vor und nach einem Schreibvorgang werden die aktuellen Konten, Quellen, Dateiversionen, Mountnachweise und Hör-/Lesestände über die Original-APIs verglichen. Eine reine Fortschrittsänderung löst weder lokale Pfadauflösung, Dateiattributprüfung, EPUB-Hash/Indexaufbau noch eine erneute Audio-Laufzeitmessung aus. Für native Hörbuch-/Mitlese-Ausgaben werden die ursprünglichen EPUB-Hashes ebenfalls wiederverwendet.
+
+Fehlende oder beschädigte Nachweise und laut API neue Dateiversionen werden vor einer neuen Übertragung gezielt aufgebaut. Innerhalb eines bereits offenen Journals gibt es keinen stillen Rückweg zur physischen Dateiprüfung: Fehlt der passende Nachweis, wartet die Wiederaufnahme auf eine ausdrückliche Prüfung. Das Journal bleibt erhalten; unsichere Schreibvorgänge werden nicht wiederholt. Eine fehlgeschlagene ausdrückliche Dateiprüfung entwertet den betroffenen Nachweis, ohne Hörstände oder Freigaben zu löschen. Ein reiner Netzwerkfehler wird von einem bestätigten Dateifehler unterschieden.
+
+Die Indexgrenzen sind über `ebook_cache_max_bytes` (1 MiB bis 16 GiB) und `ebook_cache_max_entries` (1 bis 100.000) konfigurierbar. Standardmäßig bleiben bis zu 4.096 Indizes innerhalb von 1 GiB erhalten; der RAM-Cache bleibt bei vier Indizes. Die tatsächliche Kapazität hängt von der EPUB-Komplexität ab. Ein explizit kleiner gesetztes Budget bleibt unverändert; bei Verdrängung benötigt die betroffene Ausgabe vor einer neuen Übertragung einen gezielten Neuaufbau.
+
+Ein unbemerkter Austausch von Dateiinhalten außerhalb der Mediendienste bei unveränderten API-Metadaten wird bewusst nicht durch jeden Fortschrittsabgleich gesucht. Dafür dienen „Dateiprüfung“ und die optionalen Integritätsintervalle. Die frischen Host-Deploymentnachweise behalten ihre Grenze von 150 Sekunden; dies ist keine Ablaufzeit des Mediennachweises und verursacht allein keine Inhaltslesung.
+
+Regressionen mit echten Koordinatoren und simulierten APIs verbieten Medienzugriffe während Fortschrittsänderungen, Abschließen, Zurücksetzen und Journalwiederaufnahme, auch nach einem Neustart. Sie prüfen weiterhin Konflikte, API-Versionwechsel, fehlende Nachweise und unveränderte Freigaben. Diese Tests belegen Programmverhalten; für physische HDD-Zugriffe zusätzlich Block-I/O und die anderen beteiligten Mediendienste beobachten.
+
+```sh
+python -m unittest test_podcast_transfer_io test_ebook_progress_standby test_audio_transfer_standby test_media_io_integration test_folder_transfer_io test_admin_media_guard test_epub_index_capacity
 ```

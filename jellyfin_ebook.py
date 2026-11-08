@@ -87,62 +87,121 @@ class EbookCoordinator:
         return pair,raw
 
     def checkpoint(self,binding,raw):
-        return dict(schema=1,binding=binding,raw_sha256=hashlib.sha256(encode(raw).encode()).hexdigest(),
-                    verified_at=self.b.clock())
+        """Current API observation, deliberately separate from physical proof."""
+        return dict(schema=2,binding=binding,raw_sha256=hashlib.sha256(encode(raw).encode()).hexdigest(),
+                    observed_at=self.b.clock())
+
+    def media_proof(self,stored,binding,m,now):
+        proof=stored.get('media_proof')
+        if 'media_proof' not in stored:
+            # Beta11 checkpoints were written only after hashing the original.
+            # Migration preserves that historical time; it never renews it.
+            old=stored.get('checkpoint') or {}
+            if isinstance(old,dict) and type(old.get('schema')) is int and old['schema']==1:
+                proof=dict(schema=1,binding=old.get('binding'),sha256=m['sha256'],
+                           size=m['size'],verified_at=old.get('verified_at'))
+        if (not isinstance(proof,dict)
+                or set(proof)!={'schema','binding','sha256','size','verified_at'}
+                or type(proof.get('schema')) is not int or proof['schema']!=1
+                or binding is None or proof.get('binding')!=binding
+                or proof.get('sha256')!=m['sha256'] or type(proof.get('size')) is not int
+                or proof['size']!=m['size']):return None
+        when=proof.get('verified_at')
+        if (type(now) not in (int,float) or not math.isfinite(now)
+                or type(when) not in (int,float) or not math.isfinite(when) or not 0<=when<=now):return None
+        return copy.deepcopy(proof)
+
+    def logical_guard(self):
+        """Require current service/account/deployment evidence without media I/O."""
+        self.b.guard();self.jf.guard()
+        guard=getattr(self.b,'media_observation_guard',None)
+        if guard is None:guard=getattr(self.b,'media_guard',None)
+        if guard is not None:guard('ebooks')
 
     def index_cache(self,config):
         directory=Path(self.b.root)/'ebook-index-cache' if getattr(self.b,'root',None) is not None else None
-        maximum=io_settings(config)['ebook_cache_max_bytes']
+        policy=io_settings(config)
+        maximum=policy['ebook_cache_max_bytes'];entries=policy['ebook_cache_max_entries']
         cache=getattr(self.b,'_ebook_index_cache',None)
-        if cache is None or cache.directory!=directory or cache.max_bytes!=maximum:
-            cache=EpubIndexCache(directory,max_bytes=maximum,owner=self.b)
+        if cache is None or cache.directory!=directory or cache.max_bytes!=maximum or cache.max_entries!=entries:
+            cache=EpubIndexCache(directory,max_bytes=maximum,max_entries=entries,owner=self.b)
             self.b._ebook_index_cache=cache
         return cache
 
-    def handle(self,m,apply,settle):
+    def handle(self,m,apply,settle,*,force_media=False):
         b=self.b;key='_jellyfin_ebook:'+str(m['file_id'])
         config = getattr(b, 'config', {})
-        self.jf.guard()
+        self.logical_guard()
         batch=getattr(b,'_book_observations',None)
         with batch.scope((b,'bo'),(self,'jf')) if batch is not None else nullcontext():
             raw,binding=self.read_raw(m)
         stored=b.load(key)
         checkpoint=stored.get('checkpoint') or {}
-        verified_at=checkpoint.get('verified_at')
+        if not isinstance(checkpoint,dict):checkpoint={}
         current_time=b.clock()
-        timestamp_ok=(type(current_time) in (int,float) and math.isfinite(current_time)
-                      and type(verified_at) in (int,float) and 0<=verified_at<=current_time
-                      and math.isfinite(verified_at))
+        proof=self.media_proof(stored,binding,m,current_time)
+        reusable=(not force_media and proof is not None
+                  and not integrity_due(config,current_time,proof['verified_at']))
         fingerprint=m['sha256']+':'+str(m['file_id'])+':'+m['jf_id']
         baseline=stored.get('baseline') or {}
-        if (timestamp_ok and binding is not None and not stored.get('pending') and set(baseline)=={'bo','jf'}
+        if (reusable and not stored.get('pending') and set(baseline)=={'bo','jf'}
                 and all(isinstance(row,dict) and row.get('fingerprint')==fingerprint for row in baseline.values())
-                and checkpoint.get('schema')==1 and checkpoint.get('binding')==binding
-                and checkpoint.get('raw_sha256')==hashlib.sha256(encode(raw).encode()).hexdigest()
-                and not integrity_due(config,current_time,verified_at)):
+                and checkpoint.get('schema') in (1,2) and checkpoint.get('binding')==binding
+                and checkpoint.get('raw_sha256')==hashlib.sha256(encode(raw).encode()).hexdigest()):
             # A confirmed unchanged API state needs neither path lookup nor
-            # media stat/open/hash. Pending/first/changed states never use this.
-            if apply and stored.get('candidate'):b.save(key,dict(baseline=baseline,checkpoint=checkpoint))
+            # media stat/open/hash. A changed progress state uses the separate
+            # historical physical proof plus the validated NVMe index below.
+            if apply and stored.get('candidate'):
+                b.save(key,dict(baseline=baseline,checkpoint=checkpoint,media_proof=proof))
             increment(b,'ebook_idle_skips')
             return 'unchanged'
-        if getattr(b,'media_guard',None):b.media_guard('ebooks')
-        path=Path(m['local_path']).resolve()
-        if 'folder_mappings' in config:
-            if path != Path(m['local_path']): raise ValueError('EPUB symlink or noncanonical path excluded')
-            if (translate(m['bo_path'], 'bo', 'worker', 'ebooks', config) != str(path)
-                    or translate(m['bo_path'], 'bo', 'jf', 'ebooks', config) != m['jf_path']):
-                raise ValueError('EPUB folder aliases no longer match the verified mapping')
-        elif not path.is_relative_to(Path('/ebooks')):raise ValueError('EPUB outside allowed root')
-        e=self.index_cache(config).get(path,m['sha256'],m['size'])
+        cache=self.index_cache(config)
+        if stored.get('pending') and not force_media and not reusable:
+            raise RuntimeError('Interrupted EPUB transfer requires physical-proof review')
+        e=cache.cached(m['sha256']) if reusable else None
+        if stored.get('pending') and not force_media and e is None:
+            raise RuntimeError('Interrupted EPUB transfer requires cached-index review')
+        if e is None:
+            if getattr(b,'media_guard',None):b.media_guard('ebooks')
+            try:
+                path=Path(m['local_path']).resolve()
+                if 'folder_mappings' in config:
+                    if path != Path(m['local_path']): raise ValueError('EPUB symlink or noncanonical path excluded')
+                    if (translate(m['bo_path'], 'bo', 'worker', 'ebooks', config) != str(path)
+                            or translate(m['bo_path'], 'bo', 'jf', 'ebooks', config) != m['jf_path']):
+                        raise ValueError('EPUB folder aliases no longer match the verified mapping')
+                elif not path.is_relative_to(Path('/ebooks')):raise ValueError('EPUB outside allowed root')
+                e=cache.get(path,m['sha256'],m['size'])
+            except (OSError,ValueError):
+                cache.forget(m['sha256'])
+                raise
+            proof=dict(schema=1,binding=binding,sha256=m['sha256'],size=m['size'],verified_at=b.clock())
+            # Bind the physical read only to the same live source version.
+            self.logical_guard()
+            raw,after_binding=self.read_raw(m)
+            if after_binding!=binding:raise RuntimeError('EPUB source version changed during verification')
+        else:increment(b,'ebook_media_proof_hits')
+        if apply and stored.get('media_proof')!=proof:
+            # A newly checked version is also reusable while playback/settling
+            # defers its progress transfer. Preserve every existing journal key.
+            stored['media_proof']=proof;b.save(key,stored)
         pair,raw=self.read(m,e,raw)
+        def current():
+            self.logical_guard()
+            fresh,fresh_binding=self.read_raw(m)
+            if fresh_binding!=binding:raise RuntimeError('EPUB source version changed during transfer')
+            return self.read(m,e,fresh)
+        def confirmed_state(values,observed):
+            return dict(baseline=values,checkpoint=self.checkpoint(binding,observed),media_proof=proof)
         if stored.get('pending'):
+            pair,raw=current()
             if all(same(x,stored['pending']['goal']) for x in pair.values()):
-                if apply:b.save(key,dict(baseline=pair,checkpoint=self.checkpoint(binding,raw)))
+                if apply:b.save(key,confirmed_state(pair,raw))
                 return 'unchanged'
             raise RuntimeError('Interrupted EPUB transfer requires journal review')
         source=choose(pair,stored.get('baseline'))
         if source is None:
-            if apply:b.save(key,dict(baseline=pair,checkpoint=self.checkpoint(binding,raw)))
+            if apply:b.save(key,confirmed_state(pair,raw))
             return 'unchanged'
         if not apply:return 'proposed'
         signature=hashlib.sha256(encode(raw).encode()).hexdigest();candidate=stored.get('candidate',{})
@@ -157,10 +216,7 @@ class EbookCoordinator:
             lib=b.bo.library(m['bo_library_id']);threshold=lib.get('markAsFinishedPercentComplete')
             if pct>=(98 if threshold is None else threshold):raise ValueError('BookOrbit would prematurely mark EPUB finished')
         def unchanged():
-            if getattr(b,'media_guard',None):b.media_guard('ebooks')
-            b.guard();self.jf.guard()
-            verified_bytes(path,m['sha256'],m['size'],b)
-            _,fresh=self.read(m,e)
+            _,fresh=current()
             if encode(fresh)!=encode(raw):raise RuntimeError('Concurrent EPUB progress change')
         unchanged()
         record=dict(id=str(uuid.uuid4()),goal=goal,source=source,before=raw,stage='prepared')
@@ -171,17 +227,17 @@ class EbookCoordinator:
             date=raw['progress'].get('updatedAt')
             if date:update['LastPlayedDate']=date
             unchanged();stage('sending_jellyfin');self.jf.update(m['jf_id'],update)
-            final,fr=self.read(m,e)
+            final,fr=current()
             if fr['progress']!=raw['progress'] or fr['status']!=raw['status']:raise RuntimeError('BookOrbit changed during EPUB transfer')
         else:
             unchanged();stage('sending_bookorbit_position')
             write_reading(b.bo,m['file_id'],raw['progress'],point,pct)
-            current,fr=self.read(m,e)
-            if fr['jf']!=raw['jf'] or not same(dict(current['bo'],status=goal['status']),goal):raise RuntimeError('BookOrbit EPUB position not confirmed')
+            after_position,fr=current()
+            if fr['jf']!=raw['jf'] or not same(dict(after_position['bo'],status=goal['status']),goal):raise RuntimeError('BookOrbit EPUB position not confirmed')
             if fr['progress'].get('narration')!=raw['progress'].get('narration') or fr['progress'].get('kobo')!=raw['progress'].get('kobo') or fr['progress'].get('koreader')!=raw['progress'].get('koreader'):
                 raise RuntimeError('Unrelated reading marker changed')
             raw=fr
-            if current['bo']['status']!=goal['status']:
+            if after_position['bo']['status']!=goal['status']:
                 unchanged();stage('sending_bookorbit_status')
                 previous=raw['status'] or {};date=raw['jf'].get('LastPlayedDate')
                 finished=None
@@ -189,14 +245,13 @@ class EbookCoordinator:
                     if not date:raise RuntimeError('Jellyfin EPUB completion date missing')
                     finished=datetime.fromisoformat(date.replace('Z','+00:00')).date().isoformat()
                 b.bo.write_status(m['bo_id'],'read' if goal['status']=='finished' else 'reading',started_at=previous.get('startedAt'),finished_at=finished)
-            final,fr=self.read(m,e)
+            final,fr=current()
         if not all(same(v,goal) for v in final.values()):raise RuntimeError('EPUB transfer not confirmed')
-        # A source edit during the final request leaves the durable journal
-        # pending; it must not create an idle checkpoint for unverified bytes.
-        if getattr(b,'media_guard',None):b.media_guard('ebooks')
-        verified_bytes(path,m['sha256'],m['size'],b)
+        # Progress-only transfers retain the original historical physical time.
+        # Hidden external byte edits are detected on a source-version change,
+        # an explicit physical check, or an opted-in integrity audit.
         record.update(stage='complete',after=fr);b.write_record(record['id'],key,record,'complete')
-        b.save(key,dict(baseline=final,checkpoint=self.checkpoint(binding,fr)))
+        b.save(key,confirmed_state(final,fr))
         b.event(key,'ebook_synced',dict(title=m['title'],source=source,location=index,status=goal['status']))
         return 'synced'
 

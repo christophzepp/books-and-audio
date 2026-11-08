@@ -19,6 +19,7 @@ class EbookIOTests(fixtures.EbookTests):
         self.b.root=Path(self.tmp.name)/'ssd-state'
         self.b.root.mkdir(mode=0o700)
         self.b.config={}
+        self.b.media_observation_guard=lambda kind:None
 
     def test_idle_cycles_do_not_lookup_or_open_media_or_rebuild_index(self):
         self.assertEqual(self.run_cycle(),'unchanged')
@@ -38,36 +39,44 @@ class EbookIOTests(fixtures.EbookTests):
         with patch('jellyfin_ebook.Path.resolve',side_effect=AssertionError('media lookup')):
             self.assertEqual(self.run_cycle(),'unchanged')
 
-    def test_changed_progress_after_restart_uses_disk_index_and_current_hash(self):
+    def test_changed_progress_after_restart_uses_disk_index_without_current_hash(self):
         self.run_cycle()
         self.b.__dict__.pop('_ebook_index_cache',None)
         self.c=EbookCoordinator(self.b);self.set_bo(3)
-        with patch.object(EpubLocations,'from_bytes',side_effect=AssertionError('index rebuilt')):
+        with patch.object(EpubLocations,'from_bytes',side_effect=AssertionError('index rebuilt')), \
+             patch('epub_index_cache.verified_bytes',side_effect=AssertionError('media read')):
             self.assertEqual(self.run_cycle(),'synced')
         self.assertEqual(self.e.ticks_to_index(self.user['PlaybackPositionTicks']),3)
 
-    def test_changed_same_size_original_blocks_even_with_valid_disk_index(self):
+    def test_hidden_same_size_original_edit_is_deferred_until_manual_check(self):
         self.run_cycle();self.b.__dict__.pop('_ebook_index_cache',None)
         data=self.path.read_bytes();self.path.write_bytes(data.replace(b'Hello',b'Other',1))
         self.set_bo(3)
+        self.assertEqual(self.run_cycle(),'synced')
+        with self.assertRaisesRegex(ValueError,'changed'):self.c.handle(self.m,False,0,force_media=True)
+        self.set_bo(4)
+        count=len(self.writes)
         with self.assertRaisesRegex(ValueError,'changed'):self.run_cycle()
-        self.assertFalse(self.writes)
+        self.assertEqual(len(self.writes),count)
 
-    def test_source_edit_during_final_request_keeps_pending_journal(self):
+    def test_hidden_source_edit_during_final_request_does_not_claim_new_physical_proof(self):
         self.run_cycle();self.set_bo(3)
         original=self.jf.update
         def edit_after_update(ident,values):
             original(ident,values)
             data=self.path.read_bytes();self.path.write_bytes(data.replace(b'Hello',b'Other',1))
         self.jf.update=edit_after_update
-        with self.assertRaisesRegex(ValueError,'changed'):self.run_cycle()
-        self.assertIn('pending',self.store['_jellyfin_ebook:1'])
+        before=copy.deepcopy(self.store['_jellyfin_ebook:1']['media_proof'])
+        self.assertEqual(self.run_cycle(),'synced')
+        self.assertNotIn('pending',self.store['_jellyfin_ebook:1'])
+        self.assertEqual(self.store['_jellyfin_ebook:1']['media_proof'],before)
+        with self.assertRaisesRegex(ValueError,'changed'):self.c.handle(self.m,False,0,force_media=True)
 
     def test_pending_journal_never_uses_idle_fast_path(self):
         self.run_cycle()
         self.store['_jellyfin_ebook:1']['pending']=dict(goal=dict(position=20,status='in_progress'))
-        with patch('epub_index_cache.verified_bytes',side_effect=ValueError('required current source')):
-            with self.assertRaisesRegex(ValueError,'required current source'):self.run_cycle()
+        with patch('epub_index_cache.verified_bytes',side_effect=AssertionError('media read')):
+            with self.assertRaisesRegex(RuntimeError,'Interrupted'):self.run_cycle()
         self.assertIn('pending',self.store['_jellyfin_ebook:1'])
 
     def test_invalid_checkpoint_timestamps_force_validation_when_audits_disabled(self):
@@ -76,12 +85,12 @@ class EbookIOTests(fixtures.EbookTests):
         for value in (None,True,False,'1000',float('nan'),float('inf'),float('-inf'),-1,1001):
             with self.subTest(value=value):
                 self.store['_jellyfin_ebook:1']=copy.deepcopy(good)
-                self.store['_jellyfin_ebook:1']['checkpoint']['verified_at']=value
+                self.store['_jellyfin_ebook:1']['media_proof']['verified_at']=value
                 with patch('epub_index_cache.verified_bytes',wraps=verified_bytes) as check:
                     self.assertEqual(self.run_cycle(),'unchanged');self.assertEqual(check.call_count,1)
-                self.assertEqual(self.store['_jellyfin_ebook:1']['checkpoint']['verified_at'],1000)
+                self.assertEqual(self.store['_jellyfin_ebook:1']['media_proof']['verified_at'],1000)
         self.store['_jellyfin_ebook:1']=copy.deepcopy(good)
-        del self.store['_jellyfin_ebook:1']['checkpoint']['verified_at']
+        del self.store['_jellyfin_ebook:1']['media_proof']['verified_at']
         with patch('epub_index_cache.verified_bytes',wraps=verified_bytes) as check:
             self.assertEqual(self.run_cycle(),'unchanged');self.assertEqual(check.call_count,1)
 
@@ -137,11 +146,13 @@ class EbookIOTests(fixtures.EbookTests):
         with self.assertRaises(OSError):self.run_cycle()
         self.assertFalse(self.writes)
 
-    def test_media_guard_runs_only_for_file_work_and_before_writes(self):
-        calls=[];self.b.media_guard=lambda kind:calls.append(kind)
+    def test_physical_media_guard_runs_only_for_new_or_changed_media(self):
+        calls=[];logical=[];self.b.media_guard=lambda kind:calls.append(kind)
+        self.b.media_observation_guard=lambda kind:logical.append(kind)
         self.run_cycle();self.assertEqual(calls,['ebooks']);calls.clear()
         self.run_cycle();self.assertEqual(calls,[])
-        self.set_bo(3);self.run_cycle();self.assertGreaterEqual(len(calls),3)
+        self.set_bo(3);self.run_cycle();self.assertEqual(calls,[])
+        self.assertGreaterEqual(len(logical),4)
 
     def test_serialized_index_has_identical_conversions(self):
         data=json.loads(json.dumps(self.e.cache_data()))

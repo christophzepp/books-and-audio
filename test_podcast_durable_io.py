@@ -147,7 +147,7 @@ class DurablePodcastTests(unittest.TestCase):
             self.assertTrue(self.inspect()['ready'])
         checked.assert_called_once()
 
-    def test_replacement_after_restart_stays_observation_only_and_fails_before_write(self):
+    def test_replacement_after_restart_requires_explicit_physical_check_to_detect(self):
         self.warm();self.restart_bridge();self.replace_preserving_reported_size_and_mtime()
         self.assertTrue(self.inspect()['ready'])
         self.assertFalse(self.inspect(force_source=True)['ready'])

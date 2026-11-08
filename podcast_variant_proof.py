@@ -1,8 +1,11 @@
 """Exact source proofs for status-only synchronization of measured variants.
 
 No progress or metadata writes. Only this helper's private proof-cache namespace
-may be updated. A cached ready result permits read-only status observation;
-admission and status mutations require refresh=True and a fresh receipt.
+may be updated. Confirmed media evidence stays historical. A separate current
+API authorization permits status transfers without reopening unchanged media;
+new/changed media and explicit refreshes still require fresh physical evidence.
+Silent file edits that leave all service metadata unchanged are detected only
+when an explicit physical verification is requested.
 Returned URLs are private coordinator data and must never enter public logs.
 """
 import copy
@@ -28,6 +31,42 @@ def encoded(value):return json.dumps(value,sort_keys=True,separators=(',',':'),e
 def digest(value):return hashlib.sha256(encoded(value).encode()).hexdigest()
 def finite(value):return type(value) in (int,float) and math.isfinite(value)
 def refused(reason,**fields):return dict(ready=False,fresh=False,reason=reason,**fields)
+
+
+class MediaVerificationRequired(ValueError):
+    """Missing/changed historical evidence cannot trigger media I/O in a write."""
+
+
+def current_media_guard(bridge):
+    guard=getattr(bridge,'media_observation_guard',None)
+    if callable(guard):guard('podcasts')
+
+
+def authorize_transfer(proof, clock):
+    """Attach short-lived API authority, never renew a physical receipt.
+
+    Call only after reading current service/account/source identities outside
+    an observation snapshot. The approved media binding itself never expires.
+    This token is ephemeral and does not alter approval or journal formats.
+    """
+    if not proof.get('ready') or not finite(clock):return proof
+    from podcast_status_sync import measurement_receipt
+    result=dict(proof)
+    result['transfer_authorization']=dict(schema=1,checked_at=clock,
+        media_receipt_sha256=digest(measurement_receipt(proof)))
+    return result
+
+
+def transfer_authorized(proof, clock):
+    """Current API validation bound to the unchanged historical media proof."""
+    from podcast_status_sync import measurement_receipt
+    token=proof.get('transfer_authorization')
+    try:
+        return (proof.get('ready') is True and isinstance(token,dict)
+            and set(token)=={'schema','checked_at','media_receipt_sha256'} and token['schema']==1
+            and finite(clock) and finite(token['checked_at']) and 0<=clock-token['checked_at']<=150
+            and token['media_receipt_sha256']==digest(measurement_receipt(proof)))
+    except (KeyError,TypeError,ValueError):return False
 
 
 def variant_probe_order(bridge,mappings):
@@ -162,13 +201,14 @@ class VariantProof:
                     file=dict(device=info.st_dev,inode=info.st_ino,size=info.st_size,
                               mtime_ns=info.st_mtime_ns,ctime_ns=info.st_ctime_ns),jellyfin=mapping.get('jf'))
 
-    def source_snapshot(self,mapping,*,allow_cached=False,identity=None):
-        """Durable per-episode historical evidence, never write permission.
+    def source_snapshot(self,mapping,*,allow_cached=False,identity=None,require_cached=False):
+        """Durable per-episode media evidence, separate from current API authority.
 
         Only current API identities and the relevant stable media generation
         form the lookup key. Time, process/container identity and unrelated
-        episodes/configuration cannot expire an unchanged observation. Refresh,
-        admission, journal recovery and every mutation bypass this fast path.
+        episodes/configuration cannot expire an unchanged observation. Explicit
+        refresh bypasses it. Transfer authorization requires an existing cache
+        hit; a missing/changed proof never causes physical I/O in a write path.
         """
         from pine_metadata_repair import api_source
         from podcast_sync import settings,service_unavailable
@@ -183,6 +223,7 @@ class VariantProof:
         if not usable:
             # Missing availability evidence cannot authorize a historical hit;
             # retain the historical checkpoint for the service's recovery.
+            if require_cached:raise MediaVerificationRequired('variant_media_verification_required')
             return self._source(mapping)
         try:current=api_source(self.b,mapping,require_guid=True)
         except Exception as exc:
@@ -224,6 +265,7 @@ class VariantProof:
         # A different API/generation, unknown/corrupt record or actual work
         # validates only this episode. Failures cannot leave stale RAM evidence.
         cache.pop(slot,None)
+        if require_cached:raise MediaVerificationRequired('variant_media_verification_required')
         source=self._source(mapping)
         if len(cache)>=SOURCE_CACHE_ENTRIES:cache.pop(next(iter(cache)))
         cache[slot]=dict(signature=signature,source=copy.deepcopy(source))
@@ -392,10 +434,11 @@ class VariantProof:
             raise ValueError('variant_native_identity_changed')
         return stored.get('source_fingerprint')==digest({'source':source,'native':identity})
 
-    def inspect(self,mapping,*,native=None,refresh=False,apply=False,force_source=False):
-        if any(type(flag) is not bool for flag in (refresh,apply,force_source)):return refused('variant_invalid_mode')
+    def inspect(self,mapping,*,native=None,refresh=False,apply=False,force_source=False,authorize=False):
+        if any(type(flag) is not bool for flag in (refresh,apply,force_source,authorize)):return refused('variant_invalid_mode')
         key=NAMESPACE+mapping['id'];clock=self.b.clock();attempted=False;cached=None;source_fingerprint=None
         try:
+            if authorize:current_media_guard(self.b)
             if self.b.load('_pine_alias:'+mapping['id']) or mapping.get('_pine_alias_fingerprint'):
                 return refused('variant_alias_requires_review')
             if self._pending(mapping):return refused('variant_metadata_intent_pending')
@@ -408,7 +451,7 @@ class VariantProof:
             old_account=self.b.load('_podcast_accounts').get('pinepods')
             if old_account is not None and old_account!=account:return refused('variant_account_changed')
             if native is not None and native_binding(native,mapping,account)!=identity:return refused('variant_native_identity_changed')
-            source=self.source_snapshot(mapping,allow_cached=not refresh and not force_source,identity=identity)
+            source=self.source_snapshot(mapping,allow_cached=not refresh and not force_source,identity=identity,require_cached=authorize and not refresh and not force_source)
             stored=self.b.load(key);cached=self._cache(stored,source,clock,historical=not refresh)
             evidence=cached['evidence'] if cached else self._seed(mapping,source,clock)
             if evidence is None:return refused('variant_measured_evidence_required')
@@ -416,13 +459,12 @@ class VariantProof:
             if cached and cached['binding']!=binding:return refused('variant_native_identity_changed')
             if not refresh:
                 if cached:
-                    if self._progress_pending(mapping) and not validated_audio(cached['evidence'],mapping['enclosure_url'],clock):
+                    if self._progress_pending(mapping) and not authorize and not validated_audio(cached['evidence'],mapping['enclosure_url'],clock):
                         return refused('variant_cached_evidence_expired')
-                    # Observation of an unchanged source never refreshes an
-                    # old remote measurement merely because time has passed.
-                    # Actual writes still demand refreshed(), fresh=True and
-                    # the separate 150-second measurement receipt.
-                    return self._response(cached)
+                    # Historical media evidence never gets a new timestamp.
+                    # Actual transfers request a separate current API token.
+                    result=self._response(cached)
+                    return authorize_transfer(result,clock) if authorize else result
                 return refused('fresh_variant_proof_required',own_duration=evidence['duration_seconds'],source_fingerprint=source_fingerprint)
             if cached is None and self._progress_pending(mapping):return refused('variant_pending_proof_pin')
             # Retry throttling only applies to this same exact source/account.
@@ -464,6 +506,8 @@ class VariantProof:
                     'proof_fingerprint':digest({'binding':binding,'own_duration':own}),'own_duration':own,
                     'validated_at':measured_at,'evidence':measured,'last_attempt_at':self.b.clock(),'origin':origin}
             self._save(key,record,apply,previous_proof=cached if renewal else None);return self._response(record,fresh=True)
+        except MediaVerificationRequired:
+            return refused('variant_media_verification_required')
         except Exception as exc:
             # Preserve the coordinator's existing bounded service-outage stop
             # instead of trying the same unavailable service for every title.

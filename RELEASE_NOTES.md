@@ -1,3 +1,14 @@
+## 0.1.0-beta.12 – Fortschritte übertragen, Mediennachweise behalten
+
+- Reine Hör- und Lesestandsänderungen verwenden dauerhaft bestätigte NVMe-Nachweise: keine erneute lokale Dateiprüfung, EPUB-Inhaltslesung oder Audio-Laufzeitmessung allein wegen einer Fortschrittsübertragung. Dies gilt für Podcasts, E-Books und native Hörbuch-/Mitlese-Ausgaben.
+- Aktuelle Konto-, Quellen-, API-Dateiversions-, Mount- und Fortschrittsprüfungen bleiben vor und nach Schreibvorgängen erhalten. Der ursprüngliche physische Prüfzeitpunkt wird durch Cachetreffer und neue API-Beobachtungen nicht erneuert.
+- Fehlende Nachweise werden vor neuen Übertragungen gezielt aufgebaut. Bei offenen Journalen wird ohne passenden Nachweis angehalten; es gibt keinen physischen Fallback und keinen ungeprüften Wiederholungsversuch. Ausdrückliche Dateiprüfungen lesen weiterhin die Originaldatei und entwerten bekannte fehlerhafte Nachweise.
+- EPUB-Indizes bleiben standardmäßig bis 1 GiB und 4.096 Einträge auf der NVMe erhalten, statt nach 64 Einträgen verdrängt zu werden. Beide Grenzen sind konfigurierbar; der RAM-Cache bleibt klein. Ein Test hält 1.000 Indizes über einen Neustart ohne Medienlesung verfügbar.
+- Ein außerhalb der Mediendienste vorgenommener Dateiaustausch ohne API-Metadatenänderung wird erst bei einer ausdrücklichen oder optional zeitgesteuerten Integritätsprüfung erkannt. Fortschrittsübertragungen suchen nicht mehr nach solchen versteckten Inhaltsänderungen.
+- Regressionen prüfen tatsächliche Transfers in beide Richtungen, Abschließen, Zurücksetzen, Neustarts und Journalwiederaufnahme bei verbotenem Medienzugriff sowie fortbestehende Konflikt- und Identitätskontrollen.
+
+Docker: `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.12` oder `beta`, für Linux AMD64 und ARM64. Verbindungen, Freigaben, Hörstände und Dockge-Mounts bleiben kompatibel. [Betrieb und Grenzen](BETRIEB.md#fortschrittsübertragungen-ab-beta-12).
+
 ## 0.1.0-beta.11 – Dauerhafte Nachweise und Sammelabfragen
 
 - Bestätigte Podcast-Dateizuordnungen und Medienordner werden dauerhaft im privaten Zustandsverzeichnis gespeichert. Unveränderte Nachweise verfallen nicht nach 15 Minuten und bleiben bei einem Containerneustart erhalten. Das Zustandsverzeichnis gehört auf die NVMe/SSD.

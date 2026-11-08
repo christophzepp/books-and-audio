@@ -26,6 +26,13 @@ class EpisodeReviewTests(unittest.TestCase):
         file.write_bytes(b'x'*1000)
         os.utime(file,(base.STAMP/1000,base.STAMP/1000))
         cfg.update(worker_root=str(media),pinepods_enabled=True,pinepods_optional_enrollment=True,pinepods_variant_status_only=True)
+        # Production workers provide the current kernel/mount scope. An
+        # explicit review can persist reusable proof only within that scope.
+        def media_scope(kind):
+            self.assertEqual(kind,'podcasts')
+            return 'verified-podcast-mount-generation'
+        self.b.media_observation_generation=media_scope
+        self.b.media_observation_guard=media_scope
         self.gate['podcast_mounts']['worker']['destination']=str(media)
         self.write_gate()
         self.b.pinepods=self.pine=VariantPine(lambda:self.clock)

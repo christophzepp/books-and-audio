@@ -21,7 +21,7 @@ NAMESPACE = '_podcast_status:'
 STATUSES = frozenset(('not_started', 'in_progress', 'finished'))
 REASONS = {
     'variant_proof_required': 'Different audio versions require independently verified media evidence.',
-    'variant_proof_stale': 'The different audio version must be revalidated before a status write.',
+    'variant_proof_stale': 'Current service identity validation is unavailable for the verified audio version.',
     'variant_identity_changed': 'The verified status-only participant identity changed.',
     'variant_initial_status_conflict': 'Existing started and completed states conflict; initial status needs review.',
     'variant_concurrent_status_change': 'Several participants changed to different statuses.',
@@ -267,18 +267,16 @@ class StatusCoordinator:
             finally:os.close(fd)
 
     def refreshed(self, mapping, binding=None, apply=True, *, version=None, receipt=None):
-        proof=mapping.get('_variant_proof',{})
-        # A journal may cross a normal cycle boundary while the original
-        # measured receipt is still fresh. Reuse that exact receipt only; this
-        # does not renew its timestamp or authorize a changed representation.
-        if (receipt is not None and proof.get('ready') is True
-                and measurement_receipt(proof)==receipt and version_receipt(proof)==version
-                and self.binding(mapping,proof)==binding
-                and 0<=self.b.clock()-receipt['validated_at']<=150):
-            return proof
-        if not (proof.get('fresh') is True and 0<=self.b.clock()-proof.get('validated_at',-1)<=150):
-            proof = self.c.variant_proof(mapping, refresh=True, apply=apply)
-        if not proof.get('ready') or proof.get('fresh') is not True:
+        """Revalidate API identities while retaining the historical media proof.
+
+        The physical measurement timestamp and a pending journal's original
+        receipt never become younger. A status edge alone cannot trigger a
+        media stat/read or remote audio measurement. Visible media identity
+        changes still need their ordinary targeted verification.
+        """
+        from podcast_variant_proof import transfer_authorized
+        proof=self.c.variant_proof(mapping,refresh=False,apply=False,authorize=True)
+        if not transfer_authorized(proof,self.b.clock()):
             self.mark(mapping,'variant_proof_stale','waiting')
             return None
         if (binding is not None and self.binding(mapping,proof) != binding
@@ -485,13 +483,13 @@ class StatusCoordinator:
             if mapping['jf']['id'] in self.c.jf.active_ids():
                 self.mark(mapping,'variant_active_player');return 'waiting',states
             guard(self.b);self.c.verify_mapping(mapping)
-            pinned=self.c.variant_proof(mapping,refresh=False,apply=False,force_source=True)
-            if (not pinned.get('ready') or self.binding(mapping,pinned)!=binding
-                    or version_receipt(pinned)!=record['version']):
-                raise StatusConflict('variant_identity_changed')
+            pinned=self.refreshed(mapping,binding,version=record['version'],receipt=record['media_receipt'])
+            if pinned is None:return 'waiting',states
+            proof=pinned
             current,fresh_raw=self.read(mapping,proof)
             if not raw_equal(raw,fresh_raw):raise StatusConflict('variant_concurrent_status_change')
-            if not 0<=self.b.clock()-proof.get('validated_at',-1)<=150:
+            from podcast_variant_proof import transfer_authorized
+            if not transfer_authorized(proof,self.b.clock()):
                 self.mark(mapping,'variant_proof_stale');return 'waiting',states
             checkpoint('sending')
             try:

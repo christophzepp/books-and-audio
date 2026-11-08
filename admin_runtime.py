@@ -331,6 +331,21 @@ class Administration:
         if self.folders is not None:
             self.folders.require(kind, context=self.folder_context())
 
+    def media_observation_guard(self, kind):
+        """Current host/mount authority plus historical folder evidence; no walk."""
+        if self.folders is None:return None
+        cfg, _, disabled = self.manager.effective()
+        if disabled and kind != 'podcasts':raise ValueError('Required connections are unavailable')
+        cfg=self.podcast_effective(cfg)
+        # Construct aliases from the private store without effective()/refresh(),
+        # which may deliberately perform a pending physical integrity check.
+        cfg=self.folders._effective(self.folders._read()[0],cfg)
+        gate=json.loads((self.root/'deployment.json').read_text())
+        from watch_deployment import validate_folder_aliases,validate_podcast_aliases
+        if kind=='podcasts':validate_podcast_aliases(cfg,gate)
+        else:validate_folder_aliases(cfg,gate)
+        return self.folders.require_observation(kind,context=self.folder_context(kind))
+
     def media_generation(self, kind):
         if self.folders is not None:
             return self.folders.generation(kind, context=self.folder_context(kind))
@@ -517,7 +532,7 @@ class Administration:
                             raise ValueError('unmatched_jellyfin_audio')
                         ebooks = cfg['jellyfin'].get('ebooks', []) + candidate.load('_ebook_discovery').get('mappings', [])
                         coordinator = EbookCoordinator(candidate)
-                        for mapping in ebooks: coordinator.handle(mapping, False, 0)
+                        for mapping in ebooks: coordinator.handle(mapping, False, 0, force_media=True)
                     return {'ok': True, 'provider': 'bookorbit', 'audiobooks': len(mappings),
                             'message': 'BookOrbit-Verbindungen und bestehende Hörbuch-Zuordnungen sind geprüft.'}
                 finally: close_bridge(candidate)
@@ -737,6 +752,7 @@ def folder_error(code):
         'folder_mount_unavailable': 'Die Medienfreigabe ist nicht eingehängt. Abgleich bleibt gesperrt.',
         'folder_unavailable': 'Der Ordner ist nicht vorhanden oder nicht lesbar.',
         'folder_check_pending': 'Der Ordner wurde noch nicht geprüft. Bitte „Ordner prüfen“ ausführen.',
+        'folder_verification_required': 'Für diese Ordnerzuordnung fehlt ein gültiger gespeicherter Nachweis. Bitte „Ordner prüfen“ ausführen.',
         'folder_symlink_or_not_directory': 'Bitte einen echten Medienordner ohne Verknüpfung auswählen.',
         'incompatible_folder_mapping': 'Die Ordner passen nicht zu den bestehenden Zuordnungen. Dateien werden nicht verschoben; zuerst die Freigaben der Anwendungen prüfen.',
     }.get(code, 'Ordneränderung nicht übernommen. Pfade und Freigaben prüfen.')
@@ -791,7 +807,7 @@ def public_podcasts(value, config, paused):
         if mode == 'status_only':
             status_reasons = {
                 'variant_proof_required': 'Die abweichende Audiofassung ist noch nicht vollständig bestätigt.',
-                'variant_proof_stale': 'Die abweichende Audiofassung wird vor dem Statusabgleich erneut geprüft.',
+                'variant_proof_stale': 'Die aktuelle Dienstzuordnung konnte noch nicht bestätigt werden; der gespeicherte Mediennachweis bleibt erhalten.',
                 'variant_identity_changed': 'Die Identität einer Folge hat sich geändert. Vor dem Statusabgleich ist eine Prüfung nötig.',
                 'variant_initial_status_conflict': 'Die vorhandenen Anfangszustände widersprechen sich. Es wird kein Stand ungeprüft überschrieben.',
                 'variant_concurrent_status_change': 'Mehrere Dienste melden widersprüchliche Statusänderungen. Vor einer Übernahme ist eine Prüfung nötig.',
@@ -896,6 +912,7 @@ def run_admin_loop(args, root, config, credentials, bridge_type):
                     bridge.media_guard=admin.media_guard
                     bridge.media_generation=admin.media_generation
                     bridge.media_observation_generation=admin.media_observation_generation
+                    bridge.media_observation_guard=admin.media_observation_guard
                 signature = current; next_cycle = 0
             admin.publish(bridge, disabled)
             if admin.process_one(bridge):

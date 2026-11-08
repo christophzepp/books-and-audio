@@ -424,11 +424,11 @@ class Bridge:
         batch=getattr(self,'_book_observations',None)
         return batch.scope(*[(self,name) for name in attributes]) if batch is not None else nullcontext()
 
-    def _read_mapping(self, expected, *, observe=False):
+    def _read_mapping(self, expected, *, observe=False, logical_only=False):
         with self.observation('abs','bo') if observe else self.observation():
-            return self._read_mapping_current(expected)
+            return self._read_mapping_current(expected,logical_only=logical_only)
 
-    def _read_mapping_current(self, expected):
+    def _read_mapping_current(self, expected, *, logical_only=False):
         self.require_active_mapping(expected['abs_id'])
         pin = self.native_readalong().get(expected['abs_id'])
         ai = self.abs.item(expected['abs_id'])
@@ -439,7 +439,8 @@ class Bridge:
             accepted = self.db.execute('SELECT bo_id,proof FROM native_readalong_enrollments WHERE id=?',
                                        (expected['abs_id'],)).fetchone()
             trusted = json.loads(accepted[1]) if accepted and accepted[0] == expected['bo_id'] else None
-            proof, current = native_discovery.collect(self.bo, expected, ai, bd, bm, trusted=trusted, cache_ok=True)
+            proof, current = native_discovery.collect(self.bo, expected, ai, bd, bm, trusted=trusted,
+                                                       cache_ok=True,logical_only=logical_only)
             if not accepted or accepted != (expected['bo_id'], dump(proof)):
                 raise ValueError('Native read-along has not completed verified enrollment')
             return current, bd
@@ -450,6 +451,13 @@ class Bridge:
     def _has_native_candidate(detail):
         return ((detail.get('readAloudSync') or {}).get('state') == 'enabled'
                 or any(str(f.get('format', '')).lower() == 'epub' for f in detail.get('files', [])))
+
+    def has_pending_transfer(self, id):
+        """Preparation may not rebuild physical evidence inside any audio journal."""
+        key = '_jellyfin_audio:' + id
+        return bool(self.db.execute(
+            "SELECT 1 FROM operations WHERE book IN (?,?) AND status='pending' LIMIT 1",
+            (id, key)).fetchone() or self.load(key).get('pending'))
 
     def prepare_native_readalong(self, expected, apply):
         enabled, stable = native_discovery.settings(self.config)
@@ -469,10 +477,12 @@ class Bridge:
             bm = self.bo.manifest(expected['bo_id'])
             accepted = self.db.execute('SELECT bo_id,proof FROM native_readalong_enrollments WHERE id=?', (id,)).fetchone()
             pending_witness = self.db.execute('SELECT bo_id,proof FROM native_readalong_witnesses WHERE id=?', (id,)).fetchone()
-            witness = pending_witness or accepted
+            recovering = self.has_pending_transfer(id)
+            witness = accepted if recovering else pending_witness or accepted
             trusted = json.loads(witness[1]) if witness and witness[0] == expected['bo_id'] else None
             proof, _ = native_discovery.collect(self.bo, expected, ai, bd, bm, trusted=trusted,
-                                                 cache_ok=pending_witness is None and accepted is not None)
+                                                 cache_ok=recovering or pending_witness is None and accepted is not None,
+                                                 logical_only=recovering)
             encoded = dump(proof)
             if accepted == (expected['bo_id'], encoded):
                 return
@@ -561,7 +571,7 @@ class Bridge:
         return {'abs': a, 'bo': b}, raw
 
     def read_pair(self, expected):
-        m, bd = self._read_mapping(expected)
+        m, bd = self._read_mapping(expected,logical_only=True)
         if m['fingerprint'] != expected['fingerprint']:
             raise RuntimeError('Dateizuordnung oder Manifest hat sich geaendert')
         if 'bo_assets' in expected or 'bo_chapters' in expected:
@@ -716,7 +726,8 @@ class Bridge:
         # Preview evidence is local to this call, never persisted or trusted
         # from a configuration/previous mapping supplied to the apply path.
         expected = {key: value for key, value in expected.items() if key != '_jellyfin_revision_preview'}
-        current, detail = self._read_mapping(expected, observe=True)
+        current, detail = self._read_mapping(expected, observe=True,
+            logical_only=self.has_pending_transfer(expected['abs_id']))
         if current['fingerprint'] == expected['fingerprint']:
             if 'bo_assets' in expected or 'bo_chapters' in expected:
                 reconcile_manifest_revision(expected, current)
@@ -740,9 +751,14 @@ class Bridge:
             updated = dict(updated, _jellyfin_revision_preview=jf_state)
         return updated, state, pair, raw, True
 
-    def verify_transfer_media(self, mapping):
-        """Fresh folder and native original-file checks only for actual work."""
-        guard=getattr(self,'media_guard',None)
+    def verify_transfer_media(self, mapping, *, force_media=False):
+        """Check live identities against historical proofs without opening media.
+
+        Explicit audits alone request original bytes. Normal transfer checks may
+        not silently turn a missing witness into a download during a journal.
+        """
+        guard=getattr(self,'media_guard' if force_media else 'media_observation_guard',None)
+        if guard is None and not force_media:guard=getattr(self,'media_guard',None)
         if callable(guard):guard('audiobooks')
         if self.bo is None:return
         row=self.db.execute('SELECT bo_id,proof FROM native_readalong_enrollments WHERE id=?',
@@ -751,7 +767,8 @@ class Bridge:
         trusted=json.loads(row[1])
         if not native_discovery._strong(trusted):return
         proof,current=native_discovery.collect(self.bo,mapping,self.abs.item(mapping['abs_id']),
-            self.bo.detail(mapping['bo_id']),self.bo.manifest(mapping['bo_id']),trusted=trusted,cache_ok=False)
+            self.bo.detail(mapping['bo_id']),self.bo.manifest(mapping['bo_id']),trusted=trusted,
+            cache_ok=not force_media,logical_only=not force_media)
         if proof!=trusted or current['fingerprint']!=mapping['fingerprint']:
             raise ValueError('Native source changed before progress transfer')
 

@@ -39,13 +39,14 @@ class EbookStandbyTests(EbookIOTests):
             with self.assertRaisesRegex(ValueError,'current file required'):self.run_cycle()
         self.assertFalse(self.writes)
 
-    def test_restarted_hidden_file_replacement_is_checked_before_changed_progress(self):
+    def test_restarted_hidden_file_replacement_waits_for_explicit_check(self):
         self.b.media_observation_generation=lambda kind:'same-media-mount';self.run_cycle()
         self.b.__dict__.pop('_ebook_index_cache',None);self.c=EbookCoordinator(self.b)
         data=self.path.read_bytes();self.path.write_bytes(data.replace(b'Hello',b'Other',1))
         self.set_bo(3)
-        with self.assertRaisesRegex(ValueError,'changed'):self.run_cycle()
-        self.assertFalse(self.writes)
+        self.assertEqual(self.run_cycle(),'synced')
+        with self.assertRaisesRegex(ValueError,'changed'):
+            self.c.handle(self.m,False,0,force_media=True)
 
 
 if __name__=='__main__':unittest.main()

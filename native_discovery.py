@@ -14,6 +14,7 @@ import math
 import os
 import re
 import stat
+import time
 from pathlib import PurePosixPath
 from uuid import UUID
 
@@ -23,6 +24,59 @@ from revision import mapping_identity_fingerprint, reconcile_manifest_revision
 
 class NativeEnrollmentPending(RuntimeError):
     """A verified candidate is still settling, without changing its baseline."""
+
+
+class NativeMediaVerificationRequired(ValueError):
+    """Current API identity lacks its historical byte witness; never write."""
+
+
+def _definitive_original_failure(error):
+    """Only an unusable original response revokes its historical byte proof."""
+    from bo_client import RequestError
+    prefix = 'GET /api/v1/books/files/{file_id}/download: '
+    if not isinstance(error, RequestError) or not str(error).startswith(prefix):
+        return False
+    status = getattr(error, 'status', None)
+    return (status in (404, 410) or status == 200 and str(error)[len(prefix):] in {
+        'invalid original-file response', 'invalid original-file body',
+        'original-file size changed', 'original-file body incomplete'})
+
+
+def _observation_clock(bo):
+    clock = getattr(getattr(bo, 'observation_metrics', None), 'clock', time.time)
+    when = clock() if callable(clock) else time.time()
+    return when if type(when) in (int, float) and math.isfinite(when) else time.time()
+
+
+def _revoke_original(bo, expected, proof, service, origin=None):
+    """Retain approvals but prevent known bad originals reusing old witnesses."""
+    from media_observation import ObservationStore
+    cache = getattr(bo, '_native_full_hash_cache', None)
+    if isinstance(cache, dict):cache.clear()
+    bo._native_full_hash_cache = {}
+    observations = ObservationStore(getattr(bo, 'observation_root', None))
+    observations.forget('native-readalong', expected['abs_id'])
+    observations.put('native-revocation', expected['abs_id'],
+                     {'current': proof, 'service': service},
+                     {'revoked_at': _observation_clock(bo), 'origin': signature(origin) if origin is not None else None})
+
+
+def _original_revoked(bo, expected, proof, service, origin):
+    from media_observation import ObservationStore
+    observations = ObservationStore(getattr(bo, 'observation_root', None))
+    saved = observations.get('native-revocation', expected['abs_id'],
+                             {'current': proof, 'service': service})
+    if saved is None:return False
+    # A deliberate, newer full-file user review can supersede the known
+    # failure. Its normal origin checks still run before reaching this point.
+    provenance = origin.get('sha256_evidence') if isinstance(origin, dict) else None
+    if (isinstance(saved, dict) and set(saved) == {'revoked_at', 'origin'}
+            and type(saved['revoked_at']) in (int, float) and math.isfinite(saved['revoked_at'])
+            and signature(origin) != saved['origin']
+            and _user_review_provenance(provenance)):
+        reviewed = _timestamp(provenance['reviewed_at']).timestamp()
+        if saved['revoked_at'] < reviewed <= _observation_clock(bo):return False
+    return True
 
 
 def settings(config):
@@ -407,7 +461,9 @@ def _origin(current, trusted):
     return None
 
 
-def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, trusted, cache_ok, folder_config=None):
+def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, trusted, cache_ok, folder_config=None, *, logical_only=False):
+    if type(logical_only) is not bool or logical_only and not cache_ok:
+        raise ValueError('Invalid native verification mode')
     folder_config = folder_config if folder_config is not None else getattr(bo, "folder_config", None)
     proof, current = _inspect(expected, abs_item, detail, manifest, capability, job, folder_config)
     try:
@@ -426,8 +482,10 @@ def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, t
             raise
         origin = _origin(proof, seed)
     binding=getattr(bo,'observation_binding',None)
-    key = signature({'current': proof, 'origin': origin,
-                     'service':binding() if callable(binding) else None})
+    service = binding() if callable(binding) else None
+    key = signature({'current': proof, 'origin': origin, 'service': service})
+    if cache_ok and _original_revoked(bo, expected, proof, service, origin):
+        raise NativeMediaVerificationRequired('Native original-file verification failed; explicit media verification is required')
     cache = getattr(bo, '_native_full_hash_cache', {})
     digests = cache.get(key) if cache_ok and origin is not None else None
     from media_observation import ObservationStore
@@ -442,12 +500,19 @@ def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, t
                 and all(isinstance(saved[r],str) and re.fullmatch('[0-9a-f]{64}',saved[r]) for r in saved)):
             digests=saved
             increment(getattr(bo,'observation_metrics',bo),'native_observation_durable_hits')
-    if digests is None:
+    physically_checked = digests is None
+    if physically_checked:
+        if logical_only:
+            raise NativeMediaVerificationRequired('Native media verification required for current file version')
         digests = {}
         for role in ('source', 'overlay'):
             pin = proof[role]['pin']
-            digest = bo.file_sha256(pin['overlay_file_id'], pin['overlay_size'])
+            try:digest = bo.file_sha256(pin['overlay_file_id'], pin['overlay_size'])
+            except Exception as error:
+                if _definitive_original_failure(error):_revoke_original(bo, expected, proof, service, origin)
+                raise
             if not isinstance(digest, str) or re.fullmatch('[0-9a-f]{64}', digest) is None:
+                _revoke_original(bo, expected, proof, service, origin)
                 raise ValueError('Native original-file SHA256 could not be verified')
             digests[role] = digest
         # The download server does not lock files. Re-read all metadata/job/
@@ -459,7 +524,7 @@ def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, t
             raise ValueError('Native evidence changed during full-file hashing')
     if origin is not None:
         if any(digests[role] != origin[role]['sha256'] for role in ('source', 'overlay')):
-            cache.pop(key,None)
+            _revoke_original(bo, expected, proof, service, origin)
             observations.put('native-readalong',observation_key,key,{'invalid':True})
             raise ValueError('Native full-file SHA256 changed; a new completed generation job is required')
         result = copy.deepcopy(origin)  # Preserve the actual initially witnessed API times.
@@ -470,22 +535,28 @@ def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, t
         for role in ('source', 'overlay'):
             result[role]['sha256'] = digests[role]
     if origin is not None:
-        # Historical full-file evidence is reusable only for unchanged API
-        # observations; real transfers call collect(cache_ok=False). A fresh
-        # successful verification also replaces a previously failed checkpoint.
+        # Unchanged current API evidence reuses historical hashes in idle and
+        # progress-only transfers. Explicit physical validation replaces a
+        # failed checkpoint only after verifying the original bytes again.
         if observations.get('native-readalong',observation_key,key)!=digests:
             observations.put('native-readalong',observation_key,key,digests)
         cache[key] = dict(digests)
         if len(cache) > 256:
             cache.pop(next(iter(cache)))
         bo._native_full_hash_cache = cache
+    if physically_checked:observations.forget('native-revocation', observation_key)
     return result, current
 
 
-def collect(bo, expected, abs_item, detail, manifest, *, trusted=None, cache_ok=False):
-    """Hash original EPUB bytes and retain only proven publication continuity."""
+def collect(bo, expected, abs_item, detail, manifest, *, trusted=None, cache_ok=False, logical_only=False):
+    """Validate current APIs against historical bytes, or explicitly read bytes.
+
+    logical_only never downloads original files, including on a cache miss.
+    Enrollment, changed-version preparation and manual checks may rebuild them.
+    """
     capability, job = _read_job(bo, expected['bo_id'])
-    return _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, trusted, cache_ok)
+    return _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, trusted, cache_ok,
+                           logical_only=logical_only)
 
 
 def collect_for_review(bo, expected, abs_item, detail, manifest):
@@ -500,11 +571,17 @@ def collect_for_review(bo, expected, abs_item, detail, manifest):
     capability, job = _read_job(bo, expected['bo_id'])
     proof, current = _inspect(expected, abs_item, detail, manifest, capability, job, folder_config)
     _timestamp(proof['completed_at'])
+    binding = getattr(bo, 'observation_binding', None)
+    service = binding() if callable(binding) else None
     hashes = {}
     for role in ('source', 'overlay'):
         pin = proof[role]['pin']
-        digest = bo.file_sha256(pin['overlay_file_id'], pin['overlay_size'])
+        try:digest = bo.file_sha256(pin['overlay_file_id'], pin['overlay_size'])
+        except Exception as error:
+            if _definitive_original_failure(error):_revoke_original(bo, expected, proof, service)
+            raise
         if not isinstance(digest, str) or re.fullmatch('[0-9a-f]{64}', digest) is None:
+            _revoke_original(bo, expected, proof, service)
             raise ValueError('Native original-file SHA256 could not be verified')
         hashes[role] = digest
     fresh_detail, fresh_manifest = bo.detail(expected['bo_id']), bo.manifest(expected['bo_id'])

@@ -1,8 +1,9 @@
-"""Native audiobook evidence remains historical until a real transfer needs bytes."""
+"""Native audiobook transfer uses current APIs and historical media evidence."""
 import copy
 import json
 import unittest
 from unittest.mock import patch
+from bo_client import RequestError
 
 import native_discovery
 import sync
@@ -79,18 +80,21 @@ class NativeDurableIOTests(unittest.TestCase):
 
     def test_explicit_fresh_validation_never_trusts_a_warm_observation(self):
         self.warm();before=self.business_snapshot()
-        self.bridge.verify_transfer_media(self.mapping)
+        self.bridge.verify_transfer_media(self.mapping,force_media=True)
         self.assertEqual({x[0] for x in self.hash_reads},{19,20});self.assertEqual(len(self.hash_reads),2)
         self.assertEqual(self.business_snapshot(),before);self.assertFalse(self.abs.writes or self.bo.writes)
 
-    def test_hidden_file_replacement_blocks_actual_transfer_without_changing_approvals(self):
-        self.warm();before=self.approval_snapshot();self.hashes[20]='c'*64
+    def test_hidden_file_replacement_is_deferred_until_explicit_media_check(self):
+        self.warm();approvals=self.approval_snapshot()['approvals'];self.hashes[20]='c'*64
         self.abs.set(25)
         result=self.cycle()
-        self.assertEqual(len(result['blocked']),1)
-        self.assertIn('SHA256 changed',result['blocked'][0]['reason'])
-        self.assertFalse(self.abs.writes or self.bo.writes)
-        self.assertEqual(self.approval_snapshot(),before)
+        self.assertEqual(result['synced'],1)
+        self.assertEqual(self.hash_reads,[])
+        self.assertEqual(self.bo.raw['positionMs'],25000)
+        self.assertEqual(self.approval_snapshot()['approvals'],approvals)
+        before=self.approval_snapshot()
+        with self.assertRaisesRegex(ValueError,'SHA256 changed'):
+            self.bridge.verify_transfer_media(self.mapping,force_media=True)
         self.assertEqual(len(self.hash_reads),2)
         self.hash_reads.clear();self.restart()
         self.assertEqual(len(self.cycle()['blocked']),1)
@@ -99,7 +103,11 @@ class NativeDurableIOTests(unittest.TestCase):
 
     def test_untrusted_cached_hashes_cannot_replace_a_strong_approval(self):
         self.warm();before=self.approval_snapshot();self.bo._native_full_hash_cache={}
-        with patch('media_observation.ObservationStore.get',return_value={'source':'c'*64,'overlay':'a'*64}):
+        from media_observation import ObservationStore
+        original=ObservationStore.get
+        def cached(store,namespace,*args):
+            return {'source':'c'*64,'overlay':'a'*64} if namespace=='native-readalong' else original(store,namespace,*args)
+        with patch.object(ObservationStore,'get',cached):
             result=self.cycle()
         self.assertEqual(len(result['blocked']),1)
         self.assertIn('SHA256 changed',result['blocked'][0]['reason'])
@@ -109,10 +117,10 @@ class NativeDurableIOTests(unittest.TestCase):
     def test_successful_explicit_repair_replaces_negative_checkpoint_after_restart(self):
         self.warm();before=self.business_snapshot();self.hashes[20]='c'*64
         with self.assertRaisesRegex(ValueError,'SHA256 changed'):
-            self.bridge.verify_transfer_media(self.mapping)
+            self.bridge.verify_transfer_media(self.mapping,force_media=True)
         self.assertEqual(len(self.hash_reads),2)
         self.hashes[20]='b'*64
-        self.bridge.verify_transfer_media(self.mapping)
+        self.bridge.verify_transfer_media(self.mapping,force_media=True)
         self.assertEqual(len(self.hash_reads),4)
         self.assertEqual(self.business_snapshot(),before)
         self.restart();self.hash_reads.clear()
@@ -147,13 +155,124 @@ class NativeDurableIOTests(unittest.TestCase):
         self.assertEqual(self.hash_reads,[])
         self.assertEqual(self.business_snapshot(),before)
 
-    def test_successful_transfer_verifies_originals_before_and_after_writes(self):
+    def test_successful_transfer_reuses_original_witness_without_downloads(self):
         self.warm();self.abs.set(25)
-        self.assertEqual(self.cycle()['synced'],1)
-        self.assertGreaterEqual(sum(file_id==19 for file_id,_ in self.hash_reads),2)
-        self.assertGreaterEqual(sum(file_id==20 for file_id,_ in self.hash_reads),2)
+        with patch.object(self.bo,'file_sha256',side_effect=AssertionError('progress-only media read')):
+            self.assertEqual(self.cycle()['synced'],1)
+        self.assertEqual(self.hash_reads,[])
         self.assertEqual(self.bo.raw['positionMs'],25000)
         self.assertTrue(self.bo.writes)
+
+    def test_logical_write_check_has_no_physical_fallback_on_missing_cache(self):
+        self.warm();before=self.business_snapshot()
+        self.bo._native_full_hash_cache={}
+        from media_observation import ObservationStore
+        ObservationStore(self.root).forget('native-readalong',self.mapping['abs_id'])
+        with patch.object(self.bo,'file_sha256',side_effect=AssertionError('logical fallback download')):
+            with self.assertRaises(native_discovery.NativeMediaVerificationRequired):
+                self.bridge.verify_transfer_media(self.mapping)
+        self.assertEqual(self.business_snapshot(),before)
+
+    def test_changed_api_identity_during_transfer_blocks_before_write_without_download(self):
+        self.warm();self.abs.set(25);pair,raw=self.bridge.read_pair(self.mapping)
+        self.bo.bd['files'][1]['contentVersion']='2026-10-31T02:00:00.000Z'
+        with patch.object(self.bo,'file_sha256',side_effect=AssertionError('write-time source download')):
+            with self.assertRaises(native_discovery.NativeMediaVerificationRequired):
+                self.bridge.apply(self.mapping,pair,raw,'abs_to_bo',self.initial_state['baseline'])
+        self.assertFalse(self.abs.writes or self.bo.writes)
+
+    def test_logical_folder_guard_is_used_for_progress_transfer(self):
+        self.warm();self.abs.set(25)
+        from unittest.mock import Mock
+        logical=Mock(return_value='unchanged-mount')
+        self.bridge.media_observation_guard=logical
+        self.bridge.media_guard=Mock(side_effect=AssertionError('physical folder check'))
+        self.assertEqual(self.cycle()['synced'],1)
+        self.assertGreaterEqual(logical.call_count,2)
+
+    def test_definitive_original_failures_revoke_transfer_witness_across_restart(self):
+        label='GET /api/v1/books/files/{file_id}/download: '
+        failures=[RequestError(label+'HTTP 404',404),RequestError(label+'HTTP 410',410),
+            RequestError(label+'invalid original-file response',200),
+            RequestError(label+'invalid original-file body',200),
+            RequestError(label+'original-file size changed',200),
+            RequestError(label+'original-file body incomplete',200),None]
+        for failure in failures:
+            with self.subTest(failure=str(failure)):
+                f=NativeDurableIOTests();f.setUp()
+                try:
+                    f.warm();before=f.approval_snapshot()
+                    with patch.object(f.bo,'file_sha256',side_effect=failure,return_value=None):
+                        with self.assertRaises((RequestError,ValueError)):
+                            f.bridge.verify_transfer_media(f.mapping,force_media=True)
+                    self.assertEqual(f.bo._native_full_hash_cache,{})
+                    f.restart();f.abs.set(25)
+                    with patch.object(f.bo,'file_sha256',side_effect=AssertionError('revoked proof must not rehash automatically')):
+                        result=f.cycle()
+                    self.assertEqual(len(result['blocked']),1)
+                    self.assertFalse(f.abs.writes or f.bo.writes)
+                    self.assertEqual(f.approval_snapshot(),before)
+                finally:f.doCleanups()
+
+    def test_authentication_transport_and_server_failures_preserve_media_witness(self):
+        label='GET /api/v1/books/files/{file_id}/download: '
+        failures=[RequestError(label+'HTTP '+str(code),code) for code in (401,403,429,500,503)]
+        failures += [RequestError(label+'original-file transport failure'),
+                     RequestError('POST /api/v1/auth/login: HTTP 404',404)]
+        for failure in failures:
+            with self.subTest(failure=str(failure)):
+                f=NativeDurableIOTests();f.setUp()
+                try:
+                    f.warm();before=f.approval_snapshot()
+                    with patch.object(f.bo,'file_sha256',side_effect=failure):
+                        with self.assertRaises(RequestError):f.bridge.verify_transfer_media(f.mapping,force_media=True)
+                    f.restart();f.abs.set(25)
+                    with patch.object(f.bo,'file_sha256',side_effect=AssertionError('transient failure lost media witness')):
+                        self.assertEqual(f.cycle()['synced'],1)
+                    self.assertEqual(f.approval_snapshot()['approvals'],before['approvals'])
+                finally:f.doCleanups()
+
+    def test_failed_review_download_revokes_old_normal_transfer_witness(self):
+        self.warm();before=self.approval_snapshot()
+        error=RequestError('GET /api/v1/books/files/{file_id}/download: HTTP 404',404)
+        with patch.object(self.bo,'file_sha256',side_effect=error):
+            with self.assertRaises(RequestError):
+                native_discovery.collect_for_review(self.bo,self.mapping,self.abs.item(self.mapping['abs_id']),
+                                                    self.bo.detail(self.mapping['bo_id']),self.bo.manifest(self.mapping['bo_id']))
+        self.restart();self.abs.set(25)
+        with patch.object(self.bo,'file_sha256',side_effect=AssertionError('review failure must not rehash automatically')):
+            self.assertEqual(len(self.cycle()['blocked']),1)
+        self.assertEqual(self.approval_snapshot(),before)
+        self.assertFalse(self.abs.writes or self.bo.writes)
+
+    def test_successful_explicit_verification_repairs_missing_original_revocation(self):
+        self.warm();before=self.approval_snapshot()
+        error=RequestError('GET /api/v1/books/files/{file_id}/download: HTTP 410',410)
+        with patch.object(self.bo,'file_sha256',side_effect=error):
+            with self.assertRaises(RequestError):self.bridge.verify_transfer_media(self.mapping,force_media=True)
+        self.bridge.verify_transfer_media(self.mapping,force_media=True)
+        self.assertEqual(len(self.hash_reads),2)
+        self.restart();self.hash_reads.clear();self.abs.set(25)
+        with patch.object(self.bo,'file_sha256',side_effect=AssertionError('repaired witness was not retained')):
+            self.assertEqual(self.cycle()['synced'],1)
+        self.assertEqual(self.approval_snapshot()['approvals'],before['approvals'])
+
+    def test_successful_initial_byte_witness_can_clear_previous_admission_failure(self):
+        from media_observation import ObservationStore
+        self.warm();bo_id=self.mapping['bo_id'];abs_id=self.mapping['abs_id']
+        args=(self.bo,self.mapping,self.abs.item(abs_id),self.bo.detail(bo_id),self.bo.manifest(bo_id))
+        error=RequestError('GET /api/v1/books/files/{file_id}/download: HTTP 404',404)
+        with patch.object(self.bo,'file_sha256',side_effect=error):
+            with self.assertRaises(RequestError):native_discovery.collect(*args)
+        native_discovery.collect(*args)
+        path=ObservationStore(self.root).directory/ObservationStore(self.root)._name('native-revocation',abs_id)
+        self.assertFalse(path.exists())
+
+    def test_logical_cache_hits_do_not_rewrite_or_fsync_revocation_history(self):
+        self.warm()
+        from media_observation import ObservationStore
+        with patch.object(ObservationStore,'forget',side_effect=AssertionError('idle cache hit rewrote state')):
+            self.bridge.verify_transfer_media(self.mapping)
 
 
 if __name__=='__main__':unittest.main()
