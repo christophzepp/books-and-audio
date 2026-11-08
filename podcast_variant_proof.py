@@ -19,6 +19,8 @@ NAMESPACE='_pine_variant_proof:'
 MAX_AGE=30*86400
 FRESH_SECONDS=150
 MAX_RECORD=128*1024
+SOURCE_CACHE_SECONDS=900
+SOURCE_CACHE_ENTRIES=4096
 FULL_REASONS={'mpeg_audio_without_frame_count_tag','id3_exceeds_prefix','no_valid_frame_count_header'}
 
 
@@ -110,10 +112,24 @@ class VariantProof:
     def __init__(self,bridge,probe=None):
         self.b=bridge;self.probe=probe;self.remaining=2;self.deadline=None;self.full_used=False
 
+    def _forget_source(self,mapping):
+        cache=getattr(self.b,'_podcast_source_cache',None)
+        if isinstance(cache,dict):
+            for slot in list(cache):
+                if slot[0]==mapping['id']:cache.pop(slot,None)
+
     def _source(self,mapping):
+        try:return self._inspect_source(mapping)
+        except Exception:
+            self._forget_source(mapping)
+            raise
+
+    def _inspect_source(self,mapping):
         # Preserve the metadata manager's evidence shape for existing proofs,
         # and additionally verify the current GUID, pinned in native binding.
         from podcast_sync import build_mapping,settings
+        from io_metrics import increment
+        increment(self.b,'podcast_variant_source_checks')
         cfg=settings(self.b)
         if mapping.get('_pine_unavailable'):raise ValueError('variant_source_unavailable')
         item=self.b.abs.item(mapping['podcast_id']);episodes=item.get('media',{}).get('episodes')
@@ -134,6 +150,55 @@ class VariantProof:
         return dict(mapping={key:mapping[key] for key in keys},
                     file=dict(device=info.st_dev,inode=info.st_ino,size=info.st_size,
                               mtime_ns=info.st_mtime_ns,ctime_ns=info.st_ctime_ns),jellyfin=mapping.get('jf'))
+
+    def source_snapshot(self,mapping,*,allow_cached=False,identity=None):
+        """Reuse local stat evidence only for observing an unchanged identity.
+
+        The bridge owns this bounded in-memory cache across cycle helpers. Its
+        key uses current API identities and virtual mount-generation evidence;
+        looking up a hit never resolves or stats a media path. It is not a new
+        measurement receipt. Refresh/admission and every mutation bypass it.
+        """
+        from pine_metadata_repair import api_source
+        from podcast_sync import settings
+        from io_metrics import increment
+        generation=None
+        reader=getattr(self.b,'media_generation',None)
+        if callable(reader):
+            try:generation=reader('podcasts')
+            except (OSError,ValueError):generation=None
+        usable=isinstance(generation,str) and bool(generation)
+        if not usable:
+            self._forget_source(mapping)
+            return self._source(mapping)
+        try:current=api_source(self.b,mapping,require_guid=True)
+        except Exception:
+            self._forget_source(mapping)
+            raise
+        now=self.b.clock();monotonic=time.monotonic()
+        slot=(mapping['id'],'candidate' if identity is None else 'native')
+        signature=digest(dict(api=current,guid=mapping.get('abs_guid'),identity=identity,
+            config=settings(self.b),folders=self.b.config.get('folder_mappings'),
+            abs_url=self.b.config.get('abs_url'),jellyfin=self.b.config.get('jellyfin'),
+            generation=generation))
+        cache=getattr(self.b,'_podcast_source_cache',None)
+        if not isinstance(cache,dict):cache={};self.b._podcast_source_cache=cache
+        previous=cache.get(slot)
+        if (allow_cached and usable and isinstance(previous,dict)
+                and previous.get('signature')==signature
+                and finite(now) and finite(monotonic)
+                and 0<=now-previous['at']<SOURCE_CACHE_SECONDS
+                and 0<=monotonic-previous['monotonic']<SOURCE_CACHE_SECONDS):
+            increment(self.b,'podcast_variant_source_cache_hits')
+            return copy.deepcopy(previous['source'])
+        # Remove the previous positive before checking. Failed validation,
+        # unavailable generations and clock rollback cannot retain readiness.
+        cache.pop(slot,None)
+        source=self._source(mapping)
+        if usable and finite(now) and finite(monotonic):
+            if len(cache)>=SOURCE_CACHE_ENTRIES:cache.pop(next(iter(cache)))
+            cache[slot]=dict(signature=signature,at=now,monotonic=monotonic,source=copy.deepcopy(source))
+        return source
 
     def _pending(self,mapping):
         keys=(mapping['id'],'_pine_metadata:'+mapping['id'])
@@ -223,7 +288,7 @@ class VariantProof:
         """
         try:
             if self.b.load('_pine_alias:'+mapping['id']) or mapping.get('_pine_alias_fingerprint'):return False
-            source=self._source(mapping);clock=self.b.clock()
+            source=self.source_snapshot(mapping,allow_cached=True);clock=self.b.clock()
             cached=self._cache(self.b.load(NAMESPACE+mapping['id']),source,clock)
             return cached is not None or self._seed(mapping,source,clock) is not None
         except Exception as exc:
@@ -295,8 +360,8 @@ class VariantProof:
             raise ValueError('variant_native_identity_changed')
         return stored.get('source_fingerprint')==digest({'source':source,'native':identity})
 
-    def inspect(self,mapping,*,native=None,refresh=False,apply=False):
-        if type(refresh) is not bool or type(apply) is not bool:return refused('variant_invalid_mode')
+    def inspect(self,mapping,*,native=None,refresh=False,apply=False,force_source=False):
+        if any(type(flag) is not bool for flag in (refresh,apply,force_source)):return refused('variant_invalid_mode')
         key=NAMESPACE+mapping['id'];clock=self.b.clock();attempted=False;cached=None;source_fingerprint=None
         try:
             if self.b.load('_pine_alias:'+mapping['id']) or mapping.get('_pine_alias_fingerprint'):
@@ -306,14 +371,15 @@ class VariantProof:
                 from io_metrics import increment
                 increment(self.b,'podcast_variant_backoff_skips')
                 return refused('variant_refresh_backoff')
-            source=self._source(mapping);stored=self.b.load(key);cached=self._cache(stored,source,clock)
-            evidence=cached['evidence'] if cached else self._seed(mapping,source,clock)
-            if evidence is None:return refused('variant_measured_evidence_required')
             current=self.b.pinepods.inspect_episode_metadata(mapping['feed_url'],mapping['enclosure_url'],mapping['duration'])
             account=dict(self.b.pinepods.identity);identity=native_binding(current,mapping,account)
             old_account=self.b.load('_podcast_accounts').get('pinepods')
             if old_account is not None and old_account!=account:return refused('variant_account_changed')
             if native is not None and native_binding(native,mapping,account)!=identity:return refused('variant_native_identity_changed')
+            source=self.source_snapshot(mapping,allow_cached=not refresh and not force_source,identity=identity)
+            stored=self.b.load(key);cached=self._cache(stored,source,clock)
+            evidence=cached['evidence'] if cached else self._seed(mapping,source,clock)
+            if evidence is None:return refused('variant_measured_evidence_required')
             binding={'source':source,'native':identity};source_fingerprint=digest(binding)
             if cached and cached['binding']!=binding:return refused('variant_native_identity_changed')
             if not refresh:
@@ -340,12 +406,16 @@ class VariantProof:
             own=cached['own_duration'] if cached and not renewal else measured['duration_seconds']
             if renewal and self._progress_pending(mapping):
                 return self._failed_attempt(key,cached,source_fingerprint,'variant_pending_proof_pin',apply)
-            if self._source(mapping)!=source or self._pending(mapping):
+            if self._source(mapping)!=source:
+                self._forget_source(mapping)
+                return self._failed_attempt(key,cached,source_fingerprint,'variant_source_changed_during_probe',apply)
+            if self._pending(mapping):
                 return self._failed_attempt(key,cached,source_fingerprint,'variant_source_changed_during_probe',apply)
             after=self.b.pinepods.inspect_episode_metadata(mapping['feed_url'],mapping['enclosure_url'],mapping['duration'])
             if native_binding(after,mapping,dict(self.b.pinepods.identity))!=identity:
                 return self._failed_attempt(key,cached,source_fingerprint,'variant_native_changed_during_probe',apply)
             if self._source(mapping)!=source:
+                self._forget_source(mapping)
                 return self._failed_attempt(key,cached,source_fingerprint,'variant_source_changed_during_probe',apply)
             if not 0<=self.b.clock()-measured_at<=FRESH_SECONDS:
                 return self._failed_attempt(key,cached,source_fingerprint,'variant_probe_receipt_stale',apply)

@@ -480,7 +480,7 @@ class StatusCoordinator:
             if mapping['jf']['id'] in self.c.jf.active_ids():
                 self.mark(mapping,'variant_active_player');return 'waiting',states
             guard(self.b);self.c.verify_mapping(mapping)
-            pinned=self.c.variant_proof(mapping,refresh=False,apply=False)
+            pinned=self.c.variant_proof(mapping,refresh=False,apply=False,force_source=True)
             if (not pinned.get('ready') or self.binding(mapping,pinned)!=binding
                     or version_receipt(pinned)!=record['version']):
                 raise StatusConflict('variant_identity_changed')

@@ -1,3 +1,13 @@
+## 0.1.0-beta.10 – Weniger Podcast-Dateiprüfungen
+
+- Bereits geprüfte lokale Podcast-Dateizuordnungen werden bei unveränderten API-, Konto- und Mountidentitäten im Arbeitsspeicher wiederverwendet. Die Gültigkeit endet spätestens nach 15 Minuten und wird durch Cachetreffer nicht verlängert.
+- Der Cache umfasst automatisch erkannte Audiofassungen, bestätigte manuelle Zuordnungen und persönliche Feed-Routen. Er erzeugt keine neue Laufzeitmessung und verändert keine gespeicherten Freigaben oder Hörstände.
+- Geänderte Quellmetadaten, Konten oder Mountgenerationen, ein Neustart, fehlende Identitätsnachweise und zurückspringende Uhren erzwingen eine erneute lokale Prüfung. Vor tatsächlichen Statusänderungen und beim Wiederaufnehmen offener Übertragungen wird der Cache umgangen.
+- Zusätzliche RAM-Zähler unterscheiden direkte Podcast-Dateiprüfungen von Cachetreffern. Sie messen Programmoperationen, keine physischen Festplattenzugriffe.
+- 1.431 Tests bestanden, einschließlich 100 unveränderter Beobachtungen ohne Pfadauflösung, Dateiattributabfrage oder Dateiöffnung, fester Ablaufzeit und Schutz vor Dateiaustausch während einer Prüfung.
+
+Docker: `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.10` oder `beta`, für Linux AMD64 und ARM64. Bestehende Verbindungen, Freigaben, Hörstände und Dockge-Mounts bleiben kompatibel. Der separate Floppy-Trackingdienst benötigt für diese Optimierung kein Update.
+
 ## 0.1.0-beta.9 – Weniger Zugriffe auf Medienplatten
 
 - Unveränderte, bestätigte E-Book-Stände werden zuerst über die aktuellen API- und Mountidentitäten verglichen. Ohne Änderungen entfallen Dateiöffnung, vollständiges Hashing und Indexaufbau; offene Übertragungsjournale und echte Änderungen werden weiterhin geprüft.

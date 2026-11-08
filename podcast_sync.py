@@ -395,19 +395,19 @@ class PodcastCoordinator:
         self.variant_checker = None
         self.feed_resolver = None
 
-    def variant_proof(self, mapping, *, refresh=False, apply=False):
+    def variant_proof(self, mapping, *, refresh=False, apply=False, force_source=False):
         from podcast_review import PREFIX, reported_proof
         reviewed = self.b.load(PREFIX + mapping['id'])
         if reviewed.get('mode')=='personal_route':
             from episode_editor import route_proof
             from podcast_status_sync import StatusCoordinator,StatusConflict,version_receipt
-            proof=route_proof(self,mapping,reviewed['route'])
+            proof=route_proof(self,mapping,reviewed['route'],refresh=refresh,force_source=force_source)
             if StatusCoordinator(self).binding(mapping,proof)!=reviewed['binding'] or version_receipt(proof)!=reviewed['version']:
                 raise StatusConflict('variant_identity_changed')
             return proof
         if reviewed.get('mode') == 'reported':
             from podcast_status_sync import StatusCoordinator, StatusConflict, version_receipt
-            proof = reported_proof(self, mapping)
+            proof = reported_proof(self, mapping, refresh=refresh, force_source=force_source)
             if (StatusCoordinator(self).binding(mapping, proof) != reviewed['binding']
                     or version_receipt(proof) != reviewed['version']):
                 raise StatusConflict('variant_identity_changed')
@@ -415,7 +415,7 @@ class PodcastCoordinator:
         from podcast_variant_proof import VariantProof
         if self.variant_checker is None:
             self.variant_checker=VariantProof(self.b)
-        result=self.variant_checker.inspect(mapping,refresh=refresh,apply=apply)
+        result=self.variant_checker.inspect(mapping,refresh=refresh,apply=apply,force_source=force_source)
         if result.get('ready'):
             mapping['_variant_proof']=result
         return result
@@ -711,7 +711,9 @@ class PodcastCoordinator:
                 if status_pending:raise StatusConflict('variant_pending_review')
                 mapping.update(_variant_disabled=True,_pine_status_reason_code='variant_status_disabled')
             else:
-                proof=self.variant_proof(mapping,refresh=False,apply=apply)
+                # Recovery must validate the local source even when the last
+                # completed step only needs journal readback/finalization.
+                proof=self.variant_proof(mapping,refresh=False,apply=apply,force_source=bool(status_pending))
                 if not proof.get('ready'):
                     proof=self.variant_proof(mapping,refresh=apply,apply=apply)
                 if proof.get('ready'):

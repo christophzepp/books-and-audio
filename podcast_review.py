@@ -13,20 +13,20 @@ class ReviewError(ValueError):
     """Only static, user-facing diagnostics belong here."""
 
 
-def reported_proof(c, mapping):
+def reported_proof(c, mapping, *, refresh=True, force_source=False):
     # A human can explicitly accept the current personal catalog duration. Pin
     # the same file, account, URLs, and native IDs on every subsequent read.
     checker = VariantProof(c.b)
-    source = checker._source(mapping)
     native = c.pine.inspect_episode_metadata(mapping['feed_url'], mapping['enclosure_url'], mapping['duration'])
     identity = native_binding(native, mapping, c.pine.identity)
+    source = checker.source_snapshot(mapping, allow_cached=not refresh and not force_source, identity=identity)
     duration = native['duration']
     if (type(duration) not in (float, int) or not math.isfinite(duration) or not 1 <= duration <= 172800
             or abs(duration - mapping['duration']) <= 2):
         raise ReviewError('PinePods meldet keine verwendbare abweichende Laufzeit.')
     binding = fingerprint([source, identity])
     version = fingerprint([binding, duration])
-    return dict(ready=True, fresh=True, validated_at=c.b.clock(), source_fingerprint=binding,
+    return dict(ready=True, fresh=refresh, validated_at=c.b.clock(), source_fingerprint=binding,
                 proof_fingerprint=version, evidence_sha256=version, own_duration=duration,
                 **{k: identity[k] for k in ('feed_url', 'enclosure_url', 'native_episode_id', 'native_user_id')})
 

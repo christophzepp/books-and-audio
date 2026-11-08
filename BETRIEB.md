@@ -55,3 +55,11 @@ Gezielte Regressionen:
 ```sh
 python -m unittest test_ebook_io test_ebook_discovery test_folder_io_policy test_podcast_idle_io test_io_policy
 ```
+
+## Podcast-Dateiprüfungen ab Beta 10
+
+Positive lokale Podcast-Prüfergebnisse liegen ausschließlich im RAM des laufenden Workers. Unveränderte API-Quellmetadaten, die GUID, PinePods-Konto und Folgenidentität sowie die vorhandene Mountgeneration müssen weiter übereinstimmen. Ein Cacheeintrag gilt höchstens 900 Sekunden ab der direkten Prüfung; Treffer verlängern diese Frist nicht. Pro Worker werden höchstens 4.096 Einträge gehalten. Ein Neustart leert den Cache. Fehlen belastbare Mountgenerationen, bleibt die direkte Prüfung aktiv.
+
+Der Cache spart nur lokale Pfadauflösung und Dateiattributprüfungen. Native Hörstände und API-Identitäten werden weiterhin abgefragt. Er ersetzt keinen frischen Laufzeitnachweis für verschiedene Audiofassungen. Vor einer Statusübertragung, vor jedem schreibenden Übertragungsschritt, bei der Wiederaufnahme offener Journale sowie bei expliziten Prüfungen wird die Datei direkt geprüft. Eine außerhalb der Dienste vorgenommene Dateiersetzung bei unveränderten API-Daten kann im unveränderten Lesebetrieb bis zum Fristende unbemerkt bleiben; sie darf keinen ungeprüften Statusschreibvorgang auslösen.
+
+Unter `io_metrics.media` zeigen `podcast_variant_source_checks` und `podcast_variant_source_cache_hits` direkte Prüfungen und Wiederverwendungen. Für eine Messung mehrere unveränderte Zyklen nach dem ersten vollständigen Prüflauf vergleichen. Der Cache beseitigt keine Zugriffe anderer Mediendienste und garantiert keinen Festplatten-Ruhezustand.

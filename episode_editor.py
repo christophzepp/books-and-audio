@@ -45,25 +45,25 @@ def candidate(pine,m,previous=None):
                 native_user_id=user,native_podcast_id=pod['podcastid'])
 
 
-def route_proof(c,m,route):
+def route_proof(c,m,route,*,refresh=True,force_source=False):
     """Recheck local file, personal owner, exact native route and retired action namespace."""
     if ((m['feed_url'],m['enclosure_url'])!=(route['feed_url'],route['enclosure_url'])
             and 'old_actions' not in route):
         raise ReviewError('Der Nachweis für die frühere Audio-Adresse fehlt. Bitte die Zuordnung prüfen lassen.')
-    source=VariantProof(c.b)._source(m)
     dest=dict(m,feed_url=route['feed_url'],enclosure_url=route['enclosure_url'])
     n=c.pine.inspect_episode_metadata(dest['feed_url'],dest['enclosure_url'],m['duration'])
     identity=native_binding(n,dest,c.pine.identity)
     if (any(identity[k]!=route[k] for k in ('native_episode_id','native_user_id','native_podcast_id'))
             or n['metadata'].get('episodetitle')!=m['title']):
         raise ReviewError('Der persönliche PinePods-Eintrag passt nicht mehr zur Folge.')
+    source=VariantProof(c.b).source_snapshot(m,allow_cached=not refresh and not force_source,identity=identity)
     d=n['duration']
     if type(d) not in (int,float) or not math.isfinite(d) or not 1<=d<=172800:
         raise ReviewError('PinePods meldet keine verwendbare Laufzeit.')
     if 'old_actions' in route and source_history_evidence(m,c.pine.actions(m['feed_url'])['actions'])!=route['old_actions']:
         raise ReviewError('Unter der früheren Audio-Adresse hat sich der Hörstand geändert. Bitte erneut prüfen.')
     binding=fingerprint([source,identity]);version=fingerprint([binding,d])
-    return dict(ready=True,fresh=True,validated_at=c.b.clock(),source_fingerprint=binding,proof_fingerprint=version,
+    return dict(ready=True,fresh=refresh,validated_at=c.b.clock(),source_fingerprint=binding,proof_fingerprint=version,
                 evidence_sha256=version,own_duration=d,source_snapshot=source,native_identity=identity,
                 **{k:identity[k] for k in ('feed_url','enclosure_url','native_episode_id','native_user_id')})
 

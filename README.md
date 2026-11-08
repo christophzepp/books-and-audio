@@ -1,6 +1,6 @@
 # Books & Audio
 
-**Öffentliche Beta · v0.1.0-beta.9**
+**Öffentliche Beta · v0.1.0-beta.10**
 
 Unter **Podcasts → Einstellungen → Primäre Podcastquelle** kannst du PinePods, Audiobookshelf oder Jellyfin bevorzugen. Bei widersprüchlichen Anfangsständen oder gleichzeitig geänderten Hörständen wird der vorhandene, geänderte Stand dieser Quelle übernommen. Eindeutige neue Änderungen anderer Apps werden weiterhin synchronisiert. Ohne Auswahl bleibt die bisherige Konfliktprüfung aktiv; ein Update aktiviert keine Bevorzugung. Die Einstellung synchronisiert keine Abonnements und ersetzt keine eindeutige Folgenzuordnung. BookOrbit-Podcasts bleiben vorbereitet und inaktiv.
 
@@ -56,6 +56,8 @@ python -m unittest discover
 ```
 
 Die Tests verwenden synthetische Bibliotheken und simulierte Dienstantworten. Für Fehlerberichte sind Dienstversionen, Medium und die Meldung aus der Oberfläche hilfreich. Zugangsdaten und persönliche Bibliotheksdaten bitte weglassen.
+
+Ab Beta 10 werden außerdem bereits geprüfte Podcast-Dateizuordnungen bei unveränderten API-, Konto- und Mountidentitäten bis zu 15 Minuten im Arbeitsspeicher wiederverwendet. So entfallen wiederholte lokale Pfad- und Dateiattributprüfungen in unveränderten Abgleichläufen. Vor Statusübertragungen, manuellen Prüfungen und der Wiederaufnahme offener Übertragungen wird die lokale Datei weiterhin direkt kontrolliert.
 
 Ab Beta 9 entfallen vollständige EPUB-Lese- und Indexläufe bei unveränderten Leseständen. Positionsindizes werden auf dem Zustandsvolume gespeichert und Medienordnerprüfungen gebündelt. Konfiguration, Grenzen und Messung sind unter [Medienzugriffe ab Beta 9](BETRIEB.md#medienzugriffe-ab-beta-9) beschrieben. Der normale Fortschrittsabgleich und die Dateiprüfung vor echten Übertragungen bleiben erhalten.
 
