@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import stat
 import time
+from podcast_media_queue import FileCheckScheduled, require_file_check
 
 NAMESPACE='_pine_variant_proof:'
 MAX_AGE=30*86400
@@ -168,6 +169,7 @@ class VariantProof:
         for role in ('candidate','native'):store.forget('podcast-source',[mapping['id'],role])
 
     def _source(self,mapping):
+        require_file_check(self.b, mapping)
         try:return self._inspect_source(mapping)
         except Exception as exc:
             from podcast_sync import service_unavailable
@@ -223,7 +225,9 @@ class VariantProof:
         if not usable:
             # Missing availability evidence cannot authorize a historical hit;
             # retain the historical checkpoint for the service's recovery.
-            if require_cached:raise MediaVerificationRequired('variant_media_verification_required')
+            if require_cached:
+                require_file_check(self.b,mapping,enqueue_only=True)
+                raise MediaVerificationRequired('variant_media_verification_required')
             return self._source(mapping)
         try:current=api_source(self.b,mapping,require_guid=True)
         except Exception as exc:
@@ -265,7 +269,9 @@ class VariantProof:
         # A different API/generation, unknown/corrupt record or actual work
         # validates only this episode. Failures cannot leave stale RAM evidence.
         cache.pop(slot,None)
-        if require_cached:raise MediaVerificationRequired('variant_media_verification_required')
+        if require_cached:
+            require_file_check(self.b,mapping,enqueue_only=True)
+            raise MediaVerificationRequired('variant_media_verification_required')
         source=self._source(mapping)
         if len(cache)>=SOURCE_CACHE_ENTRIES:cache.pop(next(iter(cache)))
         cache[slot]=dict(signature=signature,source=copy.deepcopy(source))
@@ -315,8 +321,8 @@ class VariantProof:
             try:os.fsync(fd)
             finally:os.close(fd)
 
-    def _seed(self,mapping,source,clock):
-        record=self.b.load('_pine_metadata:'+mapping['id'])
+    def _seed(self,mapping,source,clock,record=None):
+        if record is None:record=self.b.load('_pine_metadata:'+mapping['id'])
         evidence=record.get('candidate_evidence',record.get('evidence'))
         evidence_sha=record.get('candidate_evidence_sha256',record.get('evidence_sha256'))
         if (record.get('schema')!=1 or record.get('stage')!='deferred' or record.get('source')!=source
@@ -325,6 +331,14 @@ class VariantProof:
                 or not validated_variant(evidence,mapping['enclosure_url'],mapping['duration'],evidence_epoch(evidence))):
             return None
         return copy.deepcopy(evidence)
+
+    def _possible_variant(self,mapping,stored,clock):
+        # Both positive paths require previously measured evidence. With no
+        # candidate on the state volume, even a perfect local stat cannot
+        # classify this episode as a variant.
+        if stored.get('stage')=='verified':return True
+        seed=self.b.load('_pine_metadata:'+mapping['id'])
+        return bool(seed and self._seed(mapping,seed.get('source'),clock,record=seed))
 
     def _cache(self,record,source,clock,*,historical=False):
         if not record:return None
@@ -362,9 +376,13 @@ class VariantProof:
         """
         try:
             if self.b.load('_pine_alias:'+mapping['id']) or mapping.get('_pine_alias_fingerprint'):return False
+            stored=self.b.load(NAMESPACE+mapping['id'])
+            if not self._possible_variant(mapping,stored,self.b.clock()):return False
             source=self.source_snapshot(mapping,allow_cached=True);clock=self.b.clock()
-            cached=self._cache(self.b.load(NAMESPACE+mapping['id']),source,clock,historical=True)
+            cached=self._cache(stored,source,clock,historical=True)
             return cached is not None or self._seed(mapping,source,clock) is not None
+        except FileCheckScheduled:
+            raise
         except Exception as exc:
             from podcast_sync import service_unavailable
             if service_unavailable(exc):raise
@@ -451,8 +469,10 @@ class VariantProof:
             old_account=self.b.load('_podcast_accounts').get('pinepods')
             if old_account is not None and old_account!=account:return refused('variant_account_changed')
             if native is not None and native_binding(native,mapping,account)!=identity:return refused('variant_native_identity_changed')
+            stored=self.b.load(key)
+            if not self._possible_variant(mapping,stored,clock):return refused('variant_measured_evidence_required')
             source=self.source_snapshot(mapping,allow_cached=not refresh and not force_source,identity=identity,require_cached=authorize and not refresh and not force_source)
-            stored=self.b.load(key);cached=self._cache(stored,source,clock,historical=not refresh)
+            cached=self._cache(stored,source,clock,historical=not refresh)
             evidence=cached['evidence'] if cached else self._seed(mapping,source,clock)
             if evidence is None:return refused('variant_measured_evidence_required')
             binding={'source':source,'native':identity};source_fingerprint=digest(binding)
@@ -506,6 +526,8 @@ class VariantProof:
                     'proof_fingerprint':digest({'binding':binding,'own_duration':own}),'own_duration':own,
                     'validated_at':measured_at,'evidence':measured,'last_attempt_at':self.b.clock(),'origin':origin}
             self._save(key,record,apply,previous_proof=cached if renewal else None);return self._response(record,fresh=True)
+        except FileCheckScheduled:
+            return refused('media_check_scheduled')
         except MediaVerificationRequired:
             return refused('variant_media_verification_required')
         except Exception as exc:

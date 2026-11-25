@@ -57,6 +57,7 @@ class BOClient:
         self._password = password
         self._authenticated = False
         self.user = None
+        self.expected_user_id = None
         self.session = requests.Session()
         self.session.trust_env = False
 
@@ -139,6 +140,11 @@ class BOClient:
         if (not isinstance(token, str) or not token.strip()
                 or any(char.isspace() for char in token)):
             raise RequestError(f"POST {label}: invalid token schema", 200)
+        if self.expected_user_id is not None:
+            user = result.get('user')
+            if not isinstance(user, dict) or str(user.get('id')) != self.expected_user_id:
+                self.user = None
+                raise RequestError('BookOrbit login belongs to a different account')
         self.session.headers["Authorization"] = "Bearer " + token
         self._authenticated = True
         self.user = result.get("user")

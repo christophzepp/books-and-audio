@@ -164,9 +164,15 @@ class AudioCoordinator:
                     b.save(key, dict(baseline=states,raw=rows)); b.save(id, {'baseline': pair})
                 return 'unchanged'
             raise RuntimeError('Interrupted Jellyfin transfer requires journal review')
+        from bookorbit_scope import initial_agreement, mark_agreement
+        first_agreement = initial_agreement(b, 'audio-jf:'+id, states, same)
         source = choose(states, baseline)
         if source is None:
-            if apply: b.save(key,dict(baseline=states,raw=rows)); b.save(id, {'baseline':pair})
+            if apply:
+                b.save(key, dict(baseline=states, raw=rows))
+                b.save(id, {'baseline':pair})
+                if first_agreement:
+                    mark_agreement(b, 'audio-jf:'+id)
             return 'unchanged'
         if not apply: return 'proposed'
         signature = hashlib.sha256(encode([raw, rows]).encode()).hexdigest()

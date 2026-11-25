@@ -24,6 +24,7 @@ from mapping import build_mapping, bo_to_canonical, canonical_to_bo, validate_na
 from revision import mapping_fingerprint, mapping_identity_fingerprint, reconcile_manifest_revision
 from discovery import discover
 import native_discovery
+import bookorbit_scope
 
 UTC = dt.timezone.utc
 
@@ -169,7 +170,10 @@ class Bridge:
             from jellyfin_client import JellyfinClient
             j = config['jellyfin']
             self.jellyfin = JellyfinClient(j['url'], credentials['jellyfin_token'], j['user_id'], j['username'], j['version'])
-        self.db = sqlite3.connect(self.root/'state.sqlite')
+        books_path = bookorbit_scope.database(self.root,config,create=True)
+        self.db = sqlite3.connect(books_path)
+        self._book_state_db = self.db
+        self._shared_podcast_db = sqlite3.connect(self.root/'state.sqlite') if books_path != self.root/'state.sqlite' else None
         self.db.execute('PRAGMA journal_mode=DELETE')
         self.db.execute('PRAGMA synchronous=FULL')
         self.db.executescript('''
@@ -240,6 +244,16 @@ class Bridge:
         if self.abs.version() != self.config['abs_version']:
             raise RuntimeError('Audiobookshelf-Version hat sich geaendert')
         if getattr(self, 'provider', 'bookorbit') == 'bookorbit':
+            if 'bookorbit_instance' in self.config or 'bookorbit_instance' in gate:
+                from bookorbit_instance import verify_api_instance
+                if verify_api_instance(self, gate):
+                    current = json.loads((self.root/'deployment.json').read_text())
+                    if (current.get('ok') is not True or current.get('bookorbit_instance') != gate.get('bookorbit_instance')
+                            or not 0 <= self.clock()-current.get('checked_at',0) <= 150):
+                        self._verified_bookorbit_instance = None
+                        raise RuntimeError('BookOrbit-Instanz hat sich während der Kontoprüfung geändert')
+                    if 'folder_mappings' in self.config:
+                        validate_folder_aliases(self.config,current,now=self.clock())
             if getattr(self, 'bookbridge', None) is not None:
                 evidence = self.bookbridge.probe()
                 if evidence.get('abs_enabled') is not False or evidence.get('bookorbit_enabled') is not False:
@@ -1009,13 +1023,17 @@ class Bridge:
                         else: result[jf_action] += 1
                         continue
                     result['jellyfin_audio']['awaiting_index'].append(mapping['title'])
+                first_agreement = bookorbit_scope.initial_agreement(self, 'audio:'+id, pair, equal)
                 decision=decide(pair['abs'],pair['bo'],stored.get('baseline'))
                 action=decision['action']
                 if action=='conflict':
                     raise RuntimeError(decision['reason'])
                 if action=='baseline':
                     result['unchanged']+=1
-                    if apply:self.save(id,{'baseline':pair})
+                    if apply:
+                        self.save(id, {'baseline':pair})
+                        if first_agreement:
+                            bookorbit_scope.mark_agreement(self, 'audio:'+id)
                     continue
                 proposal={'title':mapping['title'],'direction':action,'abs':pair['abs'],'bo':pair['bo']}
                 result['proposed'].append(proposal)
@@ -1062,8 +1080,12 @@ def main():
     parser.add_argument('--health',action='store_true');args=parser.parse_args()
     os.umask(0o077);root=Path(args.state);root.mkdir(parents=True,exist_ok=True)
     if args.health:
-        r=json.loads((root/'last-run.json').read_text());age=time.time()-dt.datetime.fromisoformat(r['at']).timestamp()
-        raise SystemExit(0 if age<240 and not r.get('fatal') else 1)
+        from maintenance_settings import admin_health_age
+        r=json.loads((root/'last-run.json').read_text())
+        checked_at=time.time()
+        age=checked_at-dt.datetime.fromisoformat(r['at']).timestamp()
+        limit=admin_health_age(root,checked_at) if os.environ.get('BOOK_PROGRESS_ADMIN_CONTROL')=='1' else 240
+        raise SystemExit(0 if 0 <= age < limit and not r.get('fatal') else 1)
     lock=(root/'sync.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     config=json.loads(Path(args.config).read_text())
     credentials=json.loads(Fernet(Path(args.key).read_bytes()).decrypt(Path(args.credentials).read_bytes()))

@@ -114,3 +114,46 @@ Gezielte Regressionen prüfen unter anderem dauerhafte Ablehnungen ohne Medienzu
 ```sh
 python -m unittest test_ebook_discovery_standby test_admin_ebook_retry test_io_policy test_mapping_cycle_index test_audio_mapping_cas test_observation_scaling test_cache_maintenance
 ```
+
+## Zeitpläne in der Verwaltung
+
+Unter **Zeitpläne** zeigt die Verwaltung das wirksame Intervall für den Fortschrittsabgleich. Der angezeigte Abstand beginnt mit dem Ende des vorherigen Laufs. Beim Upgrade gilt der bisher verwendete Wert weiter. Änderungen an einzelnen Einstellungen werden an der nächsten Zyklusgrenze wirksam und liegen in `/state/maintenance-schedule.json` auf dem Zustandsvolume.
+
+Für automatische Podcast-Dateiprüfungen gilt standardmäßig ein Fenster von **22:00 bis 00:00 Uhr in Europe/Berlin**. Beginn, Ende und IANA-Zeitzone lassen sich ändern. Auch Fenster über Mitternacht sind möglich. Die lokale Zeit berücksichtigt die Sommerzeit. Die Seite zeigt die Anzahl der beim letzten Podcastlauf vorgemerkten Folgen. Das optionale UTC-Fenster unter **Weitere Prüfintervalle** steuert die zusätzlichen EPUB-Inhaltsprüfungen.
+
+Neue Installationen können die Hörspielverarbeitung unter **Hörspielserien** einschalten, sobald der Hörspiel-Dienst eingerichtet ist. Der voreingestellte Prüfturnus beträgt eine Stunde. Die Verwaltung zeigt den Zeitpunkt der letzten Rückmeldung sowie Verschiebungen, entfernte leere Ordner und Konflikte. Der Sync-Prozess übergibt dem Hörspiel-Dienst über `/state/series-control/settings.json` ausschließlich den Schalter und das Intervall. Für die Anzeige liest er dessen Bericht aus `/state/series-status/status.json`.
+
+## BookOrbit über Dockge aktualisieren
+
+Der Host-Prüfer kann eine bestimmte BookOrbit-Installation über Container-Updates hinweg erkennen. Dazu trägt der Betreiber einmalig das Objekt `bookorbit_instance` in die vom Host verwaltete `config.json` ein. Die Werte in diesem Beispiel müssen durch die geprüften Werte der eigenen Installation ersetzt werden.
+
+```json
+{
+  "bookorbit_instance": {
+    "repository": "ghcr.io/bookorbit/bookorbit",
+    "compose_project": "bookorbit",
+    "compose_service": "bookorbit",
+    "data_source": "/srv/bookorbit/data",
+    "api_origin": "http://bookorbit.example:8080",
+    "user_id": 1,
+    "libraries": [
+      {"id": 1, "roots": ["/audiobooks", "/audio-dramas"]},
+      {"id": 2, "roots": ["/books"]}
+    ]
+  }
+}
+```
+
+`data_source` ist die Host-Quelle des Bind-Mounts auf `/data`. Die Bibliotheksliste enthält die IDs der eingerichteten Hörbuchbibliotheken und der aktivierten E-Book-Bibliothek mit ihren vollständigen BookOrbit-Ordnerlisten. Fehlt diese optionale Konfiguration, gelten die vorhandenen Image- und Versionsfreigaben.
+
+Der Host vergleicht Image-Herkunft, Compose-Projekt und -Dienst, Datenbindung, Prozess und Healthcheck. Nach einem erfolgreichen Wechsel auf ein offizielles Image prüft der Sync-Dienst über die API das aktive Konto und die ausgewählten Bibliotheken samt ihren Ordnern. Die übrigen Dienst- und Mount-Prüfungen gelten weiter. Eine abweichende Instanz sperrt den Buchabgleich. Der Podcastabgleich hat eine eigene Prüfung.
+
+### BookOrbit-Konto oder Bibliotheken wechseln
+
+Unter **Verbindungen → BookOrbit-Konto und Bibliotheken** das gewünschte gespeicherte Profil sowie die IDs der Hörbuch- und optionalen E-Book-Bibliothek wählen. Für ein anderes Konto zuerst ein zusätzliches BookOrbit-Profil speichern. **Prüfen** meldet sich mit diesem Profil an und zeigt bisheriges und vorgeschlagenes Konto, Bibliotheks-IDs und Ordner. Die ausdrückliche Freigabe ist fünf Minuten gültig. Beim Bestätigen werden Anmeldung, Ordner und Hostnachweis erneut gelesen. Offene Buchübertragungen oder eine geänderte Vorschau erfordern erst eine Klärung.
+
+Die Freigabe liegt im verschlüsselten Verbindungsbestand. Ein anderer Konto- oder Bibliotheksumfang erhält einen separaten Buchzustand unter `/state/bookorbit-scopes/`. Eine Rückkehr zum ursprünglichen Umfang nutzt wieder dessen Zuordnungen, Journale und Freigaben in `/state/state.sqlite`. Podcastzustände und Podcastfreigaben werden für alle Buchprofile im bestehenden Bestand geführt. Beim ersten Vergleich nach jedem Wechsel muss der Hör- oder Lesestand eines Titels bei allen beteiligten Diensten übereinstimmen. Unterschiede erscheinen als Konflikt beim betroffenen Titel. Nach einem gemeinsamen Ausgangsstand können spätere Änderungen wieder regulär übertragen werden.
+
+### Leerer Buchbestand nach der Trennung von BookBridge
+
+Wurde der frühere Buchbestand bewusst entfernt, dürfen bei `bookbridge_policy.phase = detached` die beiden expliziten Felder `"mappings": []` und `"native_readalong": {}` leer sein. Die Freigabe der laufenden Dienste, Konten und Medienordner gilt auch für einen leeren Bestand. Die aktivierte automatische Zuordnung prüft neu hinzukommende Titel nach der eingestellten Wartezeit auf stabile Identität. Ein verbliebener EPUB-Nachweis ohne zugehöriges Hörbuch sperrt die Prüfung. Das Leeren statischer Listen löscht keine bereits gespeicherten automatischen Zuordnungen, Freigaben oder Hörstände.

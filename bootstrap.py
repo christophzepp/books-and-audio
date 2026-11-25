@@ -8,6 +8,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 from admin_store import AdminStore
 from connection_manager import ConnectionManager
+from maintenance_settings import prepare_series_directories
 
 def initialize(root, cfg, creds):
     if not isinstance(cfg, dict) or not isinstance(creds, dict):
@@ -30,6 +31,7 @@ def initialize(root, cfg, creds):
         with os.fdopen(os.open(conf / filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as f:
             f.write(data)
     AdminStore(root / 'state', conf / 'secret.key').pause(True)
+    prepare_series_directories(root / 'state')
 
 def prompt_credentials(cfg):
     fields = []

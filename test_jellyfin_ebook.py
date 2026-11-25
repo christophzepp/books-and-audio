@@ -39,6 +39,18 @@ class EbookTests(unittest.TestCase):
  def set_bo(self,i,finished=False):
   point,pct=self.e.index_to_bo(i);self.progress.update(percentage=pct,text=dict(cfi=point,page=None,updatedAt='2026-10-30T12:00:00Z'),updatedAt='2026-10-30T12:00:00Z');self.status=dict(status='read' if finished else 'reading',startedAt='2026-10-30',finishedAt='2026-10-30' if finished else None)
  def set_jf(self,i,finished=False):self.user.update(PlaybackPositionTicks=self.e.index_to_ticks(i),Played=finished,PlayCount=1,LastPlayedDate='2026-10-30T12:00:00Z')
+ def test_return_to_scope_needs_common_reading_position_before_reusing_cached_baseline(self):
+  self.assertEqual(self.run_cycle(),'unchanged')
+  self.c.b.config={'_bookorbit_activation':'return-to-saved-scope'}
+  self.set_jf(4)
+  with self.assertRaisesRegex(ValueError,'Kontowechsel'):
+   self.run_cycle()
+  self.assertFalse(self.writes)
+  self.set_bo(4)
+  self.assertEqual(self.run_cycle(),'unchanged')
+  self.set_jf(5)
+  self.assertEqual(self.run_cycle(),'synced')
+  self.assertEqual(self.e.bo_to_index(self.progress['text']['cfi']),5)
  def test_both_directions_idempotent(self):
   self.assertEqual(self.run_cycle(),'unchanged');self.set_bo(3);self.assertEqual(self.run_cycle(),'synced');self.assertEqual(self.e.ticks_to_index(self.user['PlaybackPositionTicks']),3)
   self.set_jf(5);self.assertEqual(self.run_cycle(),'synced');self.assertEqual(self.e.bo_to_index(self.progress['text']['cfi']),5);self.assertEqual(self.progress['koreader'],'keep')

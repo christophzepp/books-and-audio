@@ -5,6 +5,7 @@ import hashlib
 import math
 from pathlib import Path
 import uuid
+from bookorbit_scope import baseline_needed, initial_agreement, mark_agreement
 from datetime import datetime, timezone
 from epub_index_cache import EpubIndexCache, verified_bytes
 from jellyfin_audio import choose, same, encode
@@ -144,7 +145,7 @@ class EbookCoordinator:
                   and not integrity_due(config,current_time,proof['verified_at']))
         fingerprint=m['sha256']+':'+str(m['file_id'])+':'+m['jf_id']
         baseline=stored.get('baseline') or {}
-        if (reusable and not stored.get('pending') and set(baseline)=={'bo','jf'}
+        if (reusable and not stored.get('pending') and not baseline_needed(b,key) and set(baseline)=={'bo','jf'}
                 and all(isinstance(row,dict) and row.get('fingerprint')==fingerprint for row in baseline.values())
                 and checkpoint.get('schema') in (1,2) and checkpoint.get('binding')==binding
                 and checkpoint.get('raw_sha256')==hashlib.sha256(encode(raw).encode()).hexdigest()):
@@ -199,9 +200,13 @@ class EbookCoordinator:
                 if apply:b.save(key,confirmed_state(pair,raw))
                 return 'unchanged'
             raise RuntimeError('Interrupted EPUB transfer requires journal review')
+        first_agreement = initial_agreement(b, key, pair, same)
         source=choose(pair,stored.get('baseline'))
         if source is None:
-            if apply:b.save(key,confirmed_state(pair,raw))
+            if apply:
+                b.save(key, confirmed_state(pair,raw))
+                if first_agreement:
+                    mark_agreement(b, key)
             return 'unchanged'
         if not apply:return 'proposed'
         signature=hashlib.sha256(encode(raw).encode()).hexdigest();candidate=stored.get('candidate',{})

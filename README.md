@@ -1,6 +1,10 @@
 # Books & Audio
 
-**Öffentliche Beta · v0.1.0-beta.13**
+**Öffentliche Beta · v0.1.0-beta.14**
+
+Unter **Zeitpläne** stellst du die Abfrageintervalle und das Wartungsfenster ein. Bei einer ungeklärten PinePods-Audiofassung merkt der Worker die Dateiprüfung auf dem Zustandsvolume vor. Standardmäßig prüft er diese Folgen zwischen 22 und 0 Uhr in der Zeitzone Europe/Berlin. Bereits bestätigte Titel gleichen ihren Fortschritt weiter im eingestellten Takt ab.
+
+Der optionale Hörspieldienst sortiert fertig importierte Folgen nach Serie und Folge. Sein Schreibzugriff ist auf die dafür eingebundenen Import- und Hörspielordner begrenzt. Hinweise zur Einrichtung stehen in der [Dockge-Anleitung](DOCKGE.md#hörspielserien-einsortieren).
 
 Unter **Podcasts → Einstellungen → Primäre Podcastquelle** kannst du PinePods, Audiobookshelf oder Jellyfin bevorzugen. Bei widersprüchlichen Anfangsständen oder gleichzeitig geänderten Hörständen wird der vorhandene, geänderte Stand dieser Quelle übernommen. Eindeutige neue Änderungen anderer Apps werden weiterhin synchronisiert. Ohne Auswahl bleibt die bisherige Konfliktprüfung aktiv; ein Update aktiviert keine Bevorzugung. Die Einstellung synchronisiert keine Abonnements und ersetzt keine eindeutige Folgenzuordnung. BookOrbit-Podcasts bleiben vorbereitet und inaktiv.
 
@@ -43,6 +47,8 @@ Zum Beenden: `docker compose down`. Beim nächsten Start genügen dieselben Umge
 ## Eigene Bibliotheken verbinden
 
 Der Vorschau-Stack enthält nur Books & Audio. Für echte Bibliotheken braucht die Beta eine zur Installation passende Basiskonfiguration, lesbare Medienpfade und eine regelmäßige Prüfung der beteiligten Container. Der Einrichtungsstand dieser Beta und die Schritte für Docker bzw. Dockge stehen in **[BETRIEB.md](BETRIEB.md)**.
+
+Für eine freigegebene BookOrbit-Instanz wählst du unter **Verbindungen → BookOrbit-Konto und Bibliotheken** ein gespeichertes Profil, die Hörbuch-Bibliotheken und optional die E-Book-Bibliothek. Die Prüfung zeigt die bisherigen und neuen Kontokennungen und Bibliothekspfade. Erst mit **Geprüfte Auswahl übernehmen** wird der neue Buchabgleich aktiv.
 
 ## Entwicklung
 

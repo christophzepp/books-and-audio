@@ -1,7 +1,7 @@
 name: books-and-audio
 x-service: &service
   build: .
-  image: books-and-audio:0.1.0-beta.1
+  image: books-and-audio:0.1.0-beta.14
   user: "${APP_UID:-1000}:${APP_GID:-1000}"
   init: true
   read_only: true
@@ -41,3 +41,47 @@ services:
     volumes:
       - ${DATA_DIR:-./runtime}/config:/config:ro
       - ${DATA_DIR:-./runtime}/state:/state
+
+  series-organizer:
+    <<: *service
+    profiles: [hoerspiele]
+    restart: unless-stopped
+    command: [python, series_organizer.py, --loop]
+    environment:
+      LISTENARR_ORIGIN: "${SERIES_LISTENARR_URL:-}"
+      LISTENARR_KEY_FILE: "${SERIES_LISTENARR_KEY_FILE-/series-config/listenarr.key}"
+      LISTENARR_CONFIG_FILE: "${SERIES_LISTENARR_CONFIG_FILE:-}"
+      SERIES_SPECIAL_ASINS: "${SERIES_SPECIAL_ASINS:-}"
+      SERIES_MAINTENANCE_LOCK_DIR: "${SERIES_MAINTENANCE_LOCK_DIR:-}"
+      SERIES_IMPORT_KEY_FILE: "${SERIES_IMPORT_KEY_FILE:-}"
+      SERIES_READARR_ORIGIN: "${SERIES_READARR_ORIGIN:-}"
+      SERIES_READARR_KEY_FILE: "${SERIES_READARR_KEY_FILE:-}"
+      SERIES_BOOKSHELF_ORIGIN: "${SERIES_BOOKSHELF_ORIGIN:-}"
+      SERIES_BOOKSHELF_KEY_FILE: "${SERIES_BOOKSHELF_KEY_FILE:-}"
+      SERIES_CHAPTARR_ORIGIN: "${SERIES_CHAPTARR_ORIGIN:-}"
+      SERIES_CHAPTARR_KEY_FILE: "${SERIES_CHAPTARR_KEY_FILE:-}"
+      SERIES_RMAB_ORIGIN: "${SERIES_RMAB_ORIGIN:-}"
+      SERIES_RMAB_KEY_FILE: "${SERIES_RMAB_KEY_FILE:-}"
+      SERIES_ABS_ORIGIN: "${SERIES_ABS_ORIGIN:-}"
+      SERIES_ABS_KEY_FILE: "${SERIES_ABS_KEY_FILE:-}"
+      SERIES_ABS_LIBRARY_ID: "${SERIES_ABS_LIBRARY_ID:-}"
+      SERIES_ABS_RMAB_ROOT: "${SERIES_ABS_RMAB_ROOT:-}"
+    volumes:
+      - type: bind
+        source: ${DATA_DIR:-./runtime}/state/series-control
+        target: /series-control
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${DATA_DIR:-./runtime}/state/series-status
+        target: /series-state
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${SERIES_CONFIG_DIR:-./series-config}
+        target: /series-config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${SERIES_MEDIA_DIR:-./hoerspiele}
+        target: /audio-dramas
+        bind: {create_host_path: false}

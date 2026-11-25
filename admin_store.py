@@ -11,7 +11,7 @@ import uuid
 
 from cryptography.fernet import Fernet
 
-KINDS = frozenset('connection.create connection.update connection.delete connection.test connection.activate connection.deactivate folder.create folder.update folder.delete folder.test folder.activate folder.deactivate provider.preview provider.activate podcast.preview podcast.configure episode.preview episode.approve episode.status_preview episode.status_apply review.preview review.approve ebook.retry sync.pause sync.resume events.clear'.split())
+KINDS = frozenset('connection.create connection.update connection.delete connection.test connection.activate connection.deactivate folder.create folder.update folder.delete folder.test folder.activate folder.deactivate provider.preview provider.activate podcast.preview podcast.configure episode.preview episode.approve episode.status_preview episode.status_apply review.preview review.approve ebook.retry sync.pause sync.resume events.clear schedule.update bookorbit.preview_scope bookorbit.approve_scope'.split())
 
 
 def stamp():
@@ -124,10 +124,10 @@ class AdminStore:
             db.execute('INSERT INTO audit(at,kind,detail) VALUES (?,?,?)',
                        (stamp(), 'command.failed' if error else 'command.completed', json.dumps({'command_id': ident, 'error': error})))
 
-    def review(self, ident, kind='review.preview'):
+    def review(self, ident, kind='review.preview', *, min_created_at=0):
         with self.db() as db:
             row = db.execute("SELECT private_result,created_at FROM commands WHERE id=? AND kind=? AND status='success'", (ident,kind)).fetchone()
-        if not row or not row['private_result'] or time.time() - row['created_at'] > 1800:
+        if not row or not row['private_result'] or row['created_at'] < min_created_at or time.time() - row['created_at'] > 1800:
             raise ValueError('Prüfung fehlt oder ist abgelaufen; bitte erneut prüfen')
         return self.decode(row['private_result'])
 

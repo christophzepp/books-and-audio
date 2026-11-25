@@ -24,6 +24,19 @@ class Transactions(unittest.TestCase):
         self.jf=FakeJellyfin();self.bridge.jellyfin=self.jf
         self.bridge.config['jellyfin']={'audio_library_id':'lib'}
     def assert_ok(self,r):self.assertFalse(r['blocked'],r)
+    def test_return_to_scope_with_divergent_jellyfin_never_propagates_to_bookorbit(self):
+        self.assert_ok(self.cycle())
+        self.bridge.config['_bookorbit_activation'] = 'return-to-saved-scope'
+        self.jf.data['PlaybackPositionTicks'] = 450000000
+        self.assertTrue(self.cycle()['blocked'])
+        self.assertFalse(self.abs.writes or self.bo.writes or self.jf.writes)
+        self.abs.set(45)
+        self.bo.set(45)
+        self.assert_ok(self.cycle())
+        self.jf.data['PlaybackPositionTicks'] = 650000000
+        self.assert_ok(self.cycle())
+        self.assertEqual(self.bo.raw['positionMs'], 65000)
+
     def test_initial_abs_then_bidirectional_and_idempotent(self):
         self.abs.set(25);r=self.cycle();self.assert_ok(r)
         self.assertEqual(self.jf.data['PlaybackPositionTicks'],250000000)

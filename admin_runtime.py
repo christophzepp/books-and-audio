@@ -19,6 +19,10 @@ from admin_store import AdminStore, atomic, stamp
 from connection_manager import ConnectionManager, variant_flag_only_enable
 from folder_manager import FolderManager, FolderManagerError
 from io_metrics import increment, snapshot
+from maintenance_settings import MaintenanceSchedule, ScheduleError
+from io_policy import settings as io_settings
+import bookorbit_scope
+from watch_deployment import DeploymentError
 
 
 def options(kind, cfg, credentials):
@@ -111,6 +115,8 @@ def close_bridge(bridge):
             if hasattr(client, 'close'): client.close()
             elif hasattr(client, 's'): client.s.close()
     bridge.db.close()
+    if getattr(bridge, '_shared_podcast_db', None) is not None:
+        bridge._shared_podcast_db.close()
 
 
 def variant_activation_signature(result, enrolled_ids):
@@ -183,6 +189,17 @@ class Administration:
         self.folders = FolderManager(root, base_config) if 'folder_access_roots' in base_config else None
         if self.folders: self.folders.seed()
         self.base_config, self.base_credentials = copy.deepcopy(base_config), copy.deepcopy(base_credentials)
+        saved_cfg, _, _ = self.manager.effective()
+        # Existing installations keep their active interval in the encrypted
+        # connection store. New schedule sections may first appear in config.json.
+        schedule_cfg = dict(saved_cfg)
+        for field in ('settle_seconds', 'podcast_maintenance', 'series_organizer'):
+            if field in self.base_config:
+                schedule_cfg[field] = self.base_config[field]
+        if self.folders:
+            schedule_cfg['io_policy'] = dict(schedule_cfg.get('io_policy', {}),
+                folder_validation_interval_seconds=io_settings(self.folders.base_config)['folder_validation_interval_seconds'])
+        self.schedule = MaintenanceSchedule(root, schedule_cfg)
         self.identity_path = self.store.control / 'account-identities.enc'
         self.store.recover()
         self.identities = None
@@ -237,8 +254,15 @@ class Administration:
                     if proof.get('abs_enabled') is not False or proof.get('bookorbit_enabled') is not False: return False
                 finally: client.close()
             return result.get('username') == cfg['bookbridge'].get('username')
-        self.ensure_identities()
-        expected = self.identities.get(kind)
+        if kind == 'bookorbit' and 'bookorbit_instance' in self.base_config:
+            enrolled = bookorbit_scope.public(self,old_cfg)['active']
+            if (cfg.get('bo_url','').rstrip('/') != self.base_config['bookorbit_instance']['api_origin'].rstrip('/')
+                    or sorted(result.get('library_ids',[])) != enrolled['library_ids']):
+                return False
+            expected = {'user_id':enrolled['user_id'],'library_ids':enrolled['library_ids']}
+        else:
+            self.ensure_identities()
+            expected = self.identities.get(kind)
         if expected is None: return False
         for key in ('server_id', 'user_id', 'username', 'version'):
             if key in expected and result.get(key) != expected[key]: return False
@@ -252,7 +276,7 @@ class Administration:
             return True
         # For a previously disabled required connection, validate the candidate
         # with the known other required account. This does not reactivate it.
-        test_cfg, test_credentials = copy.deepcopy(cfg), copy.deepcopy(credentials)
+        test_cfg, test_credentials = self.instance_config(copy.deepcopy(cfg)), copy.deepcopy(credentials)
         if not test_cfg.get('abs_url'):
             test_cfg.update(abs_url=self.base_config['abs_url'], abs_version=self.base_config['abs_version'])
             test_cfg.setdefault('auto_discovery', {})['abs_library_id'] = self.base_config['auto_discovery']['abs_library_id']
@@ -269,7 +293,8 @@ class Administration:
         candidate = None
         with tempfile.TemporaryDirectory(prefix='connection-check-', dir=self.store.control) as directory:
             path = Path(directory)
-            with sqlite3.connect('file:' + str(self.root / 'state.sqlite') + '?mode=ro', uri=True) as source, sqlite3.connect(path / 'state.sqlite') as dest:
+            data_path = bookorbit_scope.database(self.root,test_cfg)
+            with sqlite3.connect('file:' + str(data_path) + '?mode=ro', uri=True) as source, sqlite3.connect(bookorbit_scope.database(path,test_cfg,create=True)) as dest:
                 source.backup(dest)
             shutil.copy2(self.root / 'deployment.json', path / 'deployment.json')
             try:
@@ -294,13 +319,27 @@ class Administration:
 
     def effective(self):
         cfg, creds, disabled = self.manager.effective()
+        try:
+            cfg = self.instance_config(cfg)
+        except (DeploymentError, bookorbit_scope.ScopeError, KeyError, TypeError):
+            cfg = dict(cfg, bookorbit_instance={})
+            disabled = 'Die BookOrbit-Instanz stimmt nicht mit der Kontofreigabe überein.'
+        cfg = self.schedule.effective(cfg)
         cfg = self.podcast_effective(cfg)
         if self.folders:
+            if 'folder_validation_interval_seconds' in self.schedule.overrides:
+                self.folders.base_config.setdefault('io_policy', {})['folder_validation_interval_seconds'] = (
+                    self.schedule.overrides['folder_validation_interval_seconds'])
             try: cfg = self.folders.effective(cfg, context=self.folder_context())
             except FolderManagerError as exc: disabled = folder_error(str(exc))
         if self.identities and cfg.get('bookbridge'):
             cfg['bookbridge']['expected_abs_username'] = self.identities.get('audiobookshelf', {}).get('username')
         return cfg, creds, disabled
+
+    def instance_config(self, cfg):
+        # The host enrollment remains authoritative across upgrades to an older
+        # encrypted connection store, and cannot be introduced by a GUI profile.
+        return bookorbit_scope.overlay(self,cfg)
 
     def folder_context(self, kind=None):
         """Generation of real host evidence, independent of its heartbeat time."""
@@ -505,14 +544,15 @@ class Administration:
 
     def validate_candidate(self, cfg, creds):
         """Read-only service checks and an isolated copy of all coordinator state."""
-        with sqlite3.connect('file:' + str(self.root / 'state.sqlite') + '?mode=ro', uri=True) as source:
+        cfg = self.instance_config(cfg)
+        with sqlite3.connect('file:' + str(bookorbit_scope.database(self.root,cfg)) + '?mode=ro', uri=True) as source:
             if source.execute("SELECT 1 FROM operations WHERE status='pending' LIMIT 1").fetchone():
                 raise ValueError('pending_operations')
             if any(json.loads(row[0]).get('pending') for row in source.execute('SELECT value FROM state')):
                 raise ValueError('pending_operations')
             with tempfile.TemporaryDirectory(prefix='provider-check-', dir=self.store.control) as directory:
                 path = Path(directory)
-                with sqlite3.connect(path / 'state.sqlite') as dest: source.backup(dest)
+                with sqlite3.connect(bookorbit_scope.database(path,cfg,create=True)) as dest: source.backup(dest)
                 shutil.copy2(self.root / 'deployment.json', path / 'deployment.json')
                 candidate = None
                 try:
@@ -572,7 +612,14 @@ class Administration:
             guard = getattr(self, 'media_guard', None)
             if guard is not None: guard(media_kind)
         try:
-            if kind.startswith('connection.'):
+            if kind in ('bookorbit.preview_scope','bookorbit.approve_scope'):
+                bookorbit_scope.process(self,kind,payload,ident)
+            elif kind == 'schedule.update':
+                try:
+                    self.store.finish(ident, result=self.schedule.update(payload))
+                except ScheduleError as exc:
+                    self.store.finish(ident, error=str(exc))
+            elif kind.startswith('connection.'):
                 if kind.split('.')[1] in {'update', 'activate', 'deactivate', 'delete'} and self.podcast_pending():
                     profiles = self.manager.public()['profiles']
                     row = next((p for p in profiles if p['id'] == payload.get('id')), {})
@@ -592,13 +639,15 @@ class Administration:
                     if bridge is None:raise ReviewError('Verbindungen nicht verfügbar.')
                     if kind=='episode.status_preview' and set(payload)=={'episode_id'}:
                         require_media('podcasts')
-                        row=episode_editor.review(bridge,payload['episode_id'])
+                        with bookorbit_scope.podcast_database(bridge):
+                            row=episode_editor.review(bridge,payload['episode_id'])
                         self.store.finish(ident,result=dict(row,review_id=ident),private=row)
                     elif kind=='episode.status_apply' and set(payload)=={'review_id','digest','source','confirm'} and payload['confirm'] is True:
                         row=self.store.review(payload['review_id'],'episode.status_preview')
                         if row['digest']!=payload['digest']:raise ReviewError('Die Freigabe passt nicht zur Prüfung.')
                         require_media('podcasts')
-                        episode_editor.review(bridge,row['episode_id'],record=row,source=payload['source'])
+                        with bookorbit_scope.podcast_database(bridge):
+                            episode_editor.review(bridge,row['episode_id'],record=row,source=payload['source'])
                         self.store.finish(ident,result={'approved':True})
                     else:raise ReviewError('Ungültiger Prüfauftrag.')
                 except ReviewError as exc:self.store.finish(ident,error=str(exc))
@@ -609,7 +658,8 @@ class Administration:
                         raise podcast_review.ReviewError('Bitte zuerst die Podcast-Verbindungen prüfen.')
                     if kind == 'episode.preview' and set(payload) == {'episode_id'}:
                         require_media('podcasts')
-                        row = podcast_review.review(bridge, payload['episode_id'])
+                        with bookorbit_scope.podcast_database(bridge):
+                            row = podcast_review.review(bridge, payload['episode_id'])
                         self.store.finish(ident, result=dict(row,review_id=ident), private=row)
                     elif (kind == 'episode.approve' and set(payload) == {'review_id','digest','source','confirm'}
                           and payload['confirm'] is True):
@@ -617,7 +667,8 @@ class Administration:
                         if row['digest'] != payload['digest']:
                             raise podcast_review.ReviewError('Die Freigabe passt nicht zur angezeigten Prüfung.')
                         require_media('podcasts')
-                        podcast_review.review(bridge,row['episode_id'],record=row,source=payload['source'])
+                        with bookorbit_scope.podcast_database(bridge):
+                            podcast_review.review(bridge,row['episode_id'],record=row,source=payload['source'])
                         self.store.finish(ident, result={'approved':True})
                     else:
                         raise podcast_review.ReviewError('Ungültiger Prüfauftrag für die Folge.')
@@ -665,7 +716,9 @@ class Administration:
                 elif kind == 'review.approve':
                     if set(payload) != {'review_id', 'digest', 'confirm'} or payload['confirm'] is not True:
                         raise ValueError('Die konkrete Dateifreigabe muss bestätigt werden')
-                    record = self.store.review(payload['review_id'])
+                    current, _, _ = self.manager.effective()
+                    record = self.store.review(payload['review_id'], min_created_at=current.get(
+                        bookorbit_scope.APPROVAL, {}).get('approved_at',0))
                     require_media('audiobooks')
                     result = manual_review.approve(bridge, record, payload['digest'])
                     self.store.finish(ident, result=result)
@@ -727,6 +780,9 @@ class Administration:
         for item in ebooks.get('blocked', []): issues.append(dict(item, type='ebook'))
         fatal = last.get('fatal')
         podcast_bad = podcasts['enabled'] and (not podcasts.get('at') or podcasts.get('blocked') or podcasts.get('fatal'))
+        profile_view = self.manager.public()
+        active_bo = next((p['id'] for p in profile_view['profiles'] if p['kind']=='bookorbit' and p['active']),None)
+        scope = bookorbit_scope.public(self, profile_id=active_bo)
         self.publish_changed('status.json', {'paused': paused, 'last_cycle': last.get('at'), 'blocked': issues, 'books': rows,
             'summary': {'mapped': last.get('mapped', len(rows)), 'ebooks': ebooks.get('mapped', 0),
                 'blocked': len(issues), 'waiting': last.get('waiting', 0),
@@ -734,10 +790,12 @@ class Administration:
                 'podcasts_blocked': len(podcasts.get('blocked', [])) if podcasts['enabled'] else 0},
             'last_run': last, 'podcasts': podcasts, 'admin': {'paused': paused, 'reason': disabled_reason or fatal},
             'ebook_imports': public_ebook_imports(import_report),
+            'schedule': self.schedule.public(), 'series_organizer': self.schedule.organizer_status(),
+            'bookorbit_scope': scope,
             'io_metrics': {'folders': snapshot(self.folders), 'presentation': snapshot(self), 'media': snapshot(bridge)},
             'worker': {'busy': busy, 'at': stamp()},
             'services': {}}, heartbeat=60)
-        self.publish_changed('connections-public.json', self.manager.public())
+        self.publish_changed('connections-public.json', profile_view)
 
 
 def public_ebook_imports(report):
@@ -875,6 +933,7 @@ def public_podcasts(value, config, paused):
             # Only fixed reason codes cross this boundary; exceptions can carry
             # feed URLs or provider credentials and must not reach the dashboard.
             reasons = {
+                'media_check_scheduled': 'Die Dateiprüfung ist für das nächste Medienwartungsfenster vorgemerkt.',
                 'feed_missing': 'PinePods führt keinen Podcast unter dieser Feed-Adresse. Über „Folge prüfen“ kannst du eine vorhandene Ausgabe vergleichen.',
                 'feed_ambiguous': 'Der Podcast ist in PinePods nicht eindeutig zugeordnet.',
                 'episode_missing': 'Diese Folge fehlt in PinePods.',
@@ -901,6 +960,7 @@ def public_podcasts(value, config, paused):
             item['status'] = 'paused'
         episodes.append(item)
     return dict(enabled=config.get('enabled') is True, paused=paused, at=value.get('at'),
+        file_checks_pending=value.get('file_checks_pending') if type(value.get('file_checks_pending')) is int else None,
         mapped=value.get('mapped', 0), waiting=value.get('waiting', 0), synced=value.get('synced', 0),
         blocked=[{k: copy.deepcopy(row[k]) for k in ('id', 'title', 'reason') if k in row}
                  for row in value.get('blocked', []) if isinstance(row, dict)], episodes=episodes,
@@ -919,17 +979,21 @@ def public_podcasts(value, config, paused):
 def participant_block(root, cfg):
     """An optional participant cannot disappear from an interrupted transfer."""
     if cfg.get('jellyfin', {}).get('enabled'): return None
-    with sqlite3.connect('file:' + str(Path(root) / 'state.sqlite') + '?mode=ro', uri=True) as db:
-        if db.execute("SELECT 1 FROM operations WHERE status='pending' LIMIT 1").fetchone():
-            return 'Ein Abgleich ist noch nicht abgeschlossen. Jellyfin wieder verbinden und den Vorgang prüfen.'
-        for key, value in db.execute("SELECT id,value FROM state WHERE id LIKE '_jellyfin_%' OR id LIKE '_bookbridge_audio:%' OR id LIKE '_podcast:%' OR id LIKE '_podcast_status:%'"):
-            if json.loads(value).get('pending'):
-                return 'Ein Jellyfin-Abgleich ist noch nicht abgeschlossen. Verbindung wiederherstellen oder den Vorgang prüfen.'
+    original = Path(root) / 'state.sqlite'
+    scoped = bookorbit_scope.database(root, cfg)
+    paths = [original, scoped] if scoped != original and scoped.exists() else [original]
+    for path in paths:
+        with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:
+            if db.execute("SELECT 1 FROM operations WHERE status='pending' LIMIT 1").fetchone():
+                return 'Ein Abgleich ist noch nicht abgeschlossen. Jellyfin wieder verbinden und den Vorgang prüfen.'
+            for key, value in db.execute("SELECT id,value FROM state WHERE id LIKE '_jellyfin_%' OR id LIKE '_bookbridge_audio:%' OR id LIKE '_podcast:%' OR id LIKE '_podcast_status:%'"):
+                if json.loads(value).get('pending'):
+                    return 'Ein Jellyfin-Abgleich ist noch nicht abgeschlossen. Verbindung wiederherstellen oder den Vorgang prüfen.'
     return None
 
 
 def run_admin_loop(args, root, config, credentials, bridge_type):
-    admin = Administration(root, args.key, config, credentials, bridge_type)
+    admin = Administration(root, args.key, dict(config, settle_seconds=args.settle), credentials, bridge_type)
     try: admin.ensure_identities()
     except Exception: pass  # Existing sync safety checks still govern operation.
     bridge, signature, next_cycle = None, None, 0
@@ -938,7 +1002,8 @@ def run_admin_loop(args, root, config, credentials, bridge_type):
         nonlocal next_preview
         if time.monotonic() >= next_preview:
             next_preview=time.monotonic()+0.5
-            admin.process_one(bridge,preview_only=True)
+            with bookorbit_scope.book_database(bridge):
+                admin.process_one(bridge,preview_only=True)
     try:
         while True:
             cfg, creds, disabled = admin.effective()
@@ -975,7 +1040,7 @@ def run_admin_loop(args, root, config, credentials, bridge_type):
                 else:
                     admin.publish(bridge, busy='Synchronisierung')
                     try:
-                        bridge.cycle(args.apply, args.settle)
+                        bridge.cycle(args.apply, cfg.get('settle_seconds', args.settle))
                     except Exception as exc:
                         message = str(exc) if isinstance(exc, (RuntimeError, ValueError)) or type(exc).__name__ == 'RequestError' else type(exc).__name__
                         if args.apply and bridge.load('_global_error').get('error') != message:
@@ -989,15 +1054,17 @@ def run_admin_loop(args, root, config, credentials, bridge_type):
                     else:
                         try:
                             import podcast_sync
-                            podcast_sync.run(bridge, args.apply, args.settle)
-                            if args.apply: bridge.deliver_notifications()
+                            with bookorbit_scope.podcast_database(bridge):
+                                podcast_sync.run(bridge, args.apply, cfg.get('settle_seconds', args.settle))
+                                if args.apply: bridge.deliver_notifications()
                         except Exception:
                             message = 'Podcast-Abgleich gesperrt. Verbindungen, Bibliotheken und Prüfprotokoll kontrollieren.'
                             atomic(Path(root) / 'last-podcast-run.json', {'at': stamp(), 'fatal': message, 'episodes': []})
-                            if args.apply and bridge.load('_podcast_global_error').get('error') != message:
-                                bridge.alert('podcasts', message)
-                                bridge.save('_podcast_global_error', {'error': message})
-                            if args.apply: bridge.deliver_notifications()
+                            with bookorbit_scope.podcast_database(bridge):
+                                if args.apply and bridge.load('_podcast_global_error').get('error') != message:
+                                    bridge.alert('podcasts', message)
+                                    bridge.save('_podcast_global_error', {'error': message})
+                                if args.apply: bridge.deliver_notifications()
                 admin.publish(bridge, disabled)
                 next_cycle = time.monotonic() + cfg.get('interval_seconds', 60)
             for _ in range(4):

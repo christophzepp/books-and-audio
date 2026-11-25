@@ -1,3 +1,14 @@
+## 0.1.0-beta.14 – Podcast-Dateiprüfungen ab 22 Uhr und Hörspielserien
+
+- Automatische Dateiprüfungen für PinePods landen pro betroffener Folge in der SQLite-Datenbank des Workers auf der SSD. Das voreingestellte Wartungsfenster läuft von 22 bis 0 Uhr in Europe/Berlin. Pro Durchlauf können bis zu drei Folgen geprüft werden. Ein Neustart erhält die Vormerkungen und die bereits in diesem Fenster begonnenen Prüfungen.
+- Bestätigte Bücher, Hörbücher und Podcastfolgen behalten ihren bisherigen Abfragetakt. Vor einer Fortschrittsübertragung liest der Dienst die aktuellen Stände der Teilnehmer erneut. Eine vorgemerkte Prüfung speichert keinen zu übertragenden Hörstand.
+- Für eine festgelegte BookOrbit-Instanz kann der Hostprüfer offizielle Container-Updates anhand von Registry, Compose-Zuordnung und Datenmount erkennen. Der Worker prüft das Konto und die Bibliothekswurzeln über die API.
+- Bei einer freigegebenen BookOrbit-Instanz zeigt **Verbindungen → BookOrbit-Konto und Bibliotheken** das bisherige und das geprüfte neue Konto samt Bibliothekspfaden an. Der Wechsel erfordert die ausdrückliche Freigabe der geprüften Auswahl. Die Buchzustände werden je Konto und Bibliotheksauswahl getrennt geführt.
+- Die Seite **Zeitpläne** bündelt die Einstellungen für den Fortschrittsabgleich, die Bucherkennung, die Dateiprüfungen und das Intervall der Hörspieleinsortierung. Sie zeigt die Anzahl der vorgemerkten Podcastfolgen und den letzten Lauf des Einsortierers.
+- Der zusätzliche Dienst `series-organizer` sortiert abgeschlossene Hörspielimporte nach Serie und Folge. Die Medien bleiben für den Fortschritts-Worker lesbar. Der Einsortierer erhält eigene Schreibrechte für die Hörspielablage. Die Einrichtung und die unterstützten Importwege stehen in der [Hörspiel-Anleitung](SERIES.md).
+
+Docker-Image für AMD64 und ARM64 `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.14`. Für laufende Dockge-Updates dient weiterhin der Tag `beta`. [Einrichtung in Dockge](DOCKGE.md#hörspielserien-einsortieren)
+
 ## 0.1.0-beta.13 – Unveränderte Importfehler ruhen lassen
 
 - Stabile EPUB-Ausgaben, deren Inhalt nicht automatisch übernommen werden kann, erhalten einen dauerhaften negativen Nachweis auf der NVMe. Unveränderte Ausgaben werden nicht regelmäßig erneut geöffnet. Aktuelle Konto-, Mount- und API-Dateiidentitäten bleiben Voraussetzung; geänderte Quellen entwerten gezielt ihren Nachweis.

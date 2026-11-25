@@ -6,6 +6,7 @@ from pathlib import Path
 
 from admin_store import AdminStore, atomic
 from bootstrap import initialize
+from maintenance_settings import prepare_series_directories
 
 
 def publish_key(path, key):
@@ -37,6 +38,7 @@ def prepare(config_root, keys, state, cfg=None, credentials=None):
                 raise ValueError("Die bestehende Konfiguration ist unvollständig.")
             if not db.is_file() or web_key.read_bytes() != (current / "secret.key").read_bytes():
                 raise ValueError("Die Datenvolumes passen nicht zur bestehenden Installation.")
+            prepare_series_directories(state)
             return
         if not current.exists():
             if web_key.exists() or any(state.joinpath("control").iterdir()) or any(p.name != "control" for p in state.iterdir()):
@@ -52,6 +54,7 @@ def prepare(config_root, keys, state, cfg=None, credentials=None):
         with store.db() as connection:
             connection.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('paused','true')")
         atomic(ready, {"version": 1})
+        prepare_series_directories(state)
 
 
 if __name__ == "__main__":

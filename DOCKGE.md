@@ -19,7 +19,7 @@ Die neue Instanz beginnt mit leerer Bibliothek und pausierter Synchronisation. D
 
 In Dockge beim bestehenden Stack **Update/Aktualisieren** wählen. Docker lädt den aktuellen Tag `ghcr.io/christophzepp/books-and-audio:beta` und ersetzt die Container. Konto, Schlüssel, Verbindungen und Fortschrittsdaten liegen in den fünf persistenten Volumes des Stacks. Verwende bei Updates denselben Stacknamen. Bei einem Update bleiben der vorhandene Schlüssel und die gewählte Sync-Pause erhalten.
 
-Über die Kommandozeile entsprechen dem `docker compose pull` und anschließend `docker compose up -d`. Wenn du bei einer bestimmten Version bleiben möchtest, setze in Dockge `BOOKS_AUDIO_IMAGE=ghcr.io/christophzepp/books-and-audio:0.1.0-beta.2`. Jeder Container-Release enthält die dazugehörige Compose-Datei.
+Über die Kommandozeile entsprechen dem `docker compose pull` und anschließend `docker compose up -d`. Wenn du bei einer bestimmten Version bleiben möchtest, setze in Dockge `BOOKS_AUDIO_IMAGE=ghcr.io/christophzepp/books-and-audio:0.1.0-beta.14`. Jeder Container-Release enthält die dazugehörige Compose-Datei.
 
 ## Eigene Bibliotheken anbinden
 
@@ -32,3 +32,23 @@ docker compose run --rm -v /absoluter/pfad/basis.json:/basis.json:ro init python
 Danach den Stack in Dockge starten. Ergänze die erforderlichen Netzwerkverbindungen und lesbaren Medienpfade für den Worker. Die private Basiskonfiguration liegt beim Image-Stack im Volume `config` unter `current/`. Der Worker speichert den Zustand im Volume `state`. Für die Hostprüfung erwartet `watch_deployment.py --root /pfad/zum/pruefverzeichnis` dort `config/config.json` und ein beschreibbares Verzeichnis `state/`. Verknüpfe auf dem Docker-Host `config` mit dem Unterverzeichnis `current` des Konfigurationsvolumes und `state` mit dem Zustandsvolume. Die Mountpoints kannst du per `docker volume inspect` ermitteln. Der Prüfprozess muss mit denselben Dateirechten wie der Worker (UID 1000) arbeiten und die Docker-CLI ausführen können.
 
 Für eine Sicherung den Stack stoppen und die fünf zugehörigen Volumes gemeinsam sichern. Konfiguration, Schlüssel und Zustandsdaten gehören zu derselben Installation.
+
+## Hörspielserien einsortieren
+
+Die Compose-Datei enthält den zusätzlichen Dienst `series-organizer` im Profil `hoerspiele`. Für einen bestehenden, angepassten Stack überträgst du den Dienst in seine vorhandene Compose-Datei. Verwende für `series-control` und `series-status` Unterverzeichnisse des bestehenden Worker-Zustandsvolumes auf der SSD. Der Einsortierer erhält das Steuerverzeichnis lesbar und sein Journal beschreibbar. Den Hörspielordner bindest du im Einsortierer beschreibbar und im Fortschritts-Worker ausschließlich lesbar ein. Die Vorlage mit benanntem Volume verwendet dafür Docker Compose mit Unterstützung für Volume-Unterpfade. [Docker-Dokumentation](https://docs.docker.com/engine/storage/volumes/#mount-a-volume-subdirectory)
+
+1. Lege ein privates Konfigurationsverzeichnis auf der SSD an. Für Listenarr speicherst du darin dessen API-Schlüssel als `listenarr.key`, lesbar für die Container-UID 1000. Gib unter `SERIES_MEDIA_DIR` den vorhandenen Ordner für Hörspiele an. Für Listenarr muss dieser Medienordner in beiden Diensten unter `/audio-dramas` erreichbar sein.
+2. Trage die Einstellungen in Dockge ein. Die folgenden Pfade und die Listenarr-Adresse sind Beispiele. Die Adresse muss aus dem Docker-Netz des Einsortierers erreichbar sein.
+
+   ```dotenv
+   COMPOSE_PROFILES=hoerspiele
+   SERIES_MEDIA_DIR=/srv/medien/hoerspiele
+   SERIES_CONFIG_DIR=/srv/books-and-audio/series-config
+   SERIES_LISTENARR_URL=http://listenarr:4545
+   ```
+
+3. Starte den Stack und schalte in **Zeitpläne** die Hörspieleinsortierung ein. Das Standardintervall beträgt eine Stunde. Dort siehst du auch die letzte Rückmeldung, die Anzahl der verschobenen Folgen und die entfernten leeren Ordner.
+
+Für eine bereits vorhandene Listenarr-Konfiguration kannst du `SERIES_LISTENARR_KEY_FILE=` leer setzen und unter `SERIES_LISTENARR_CONFIG_FILE` den im Einsortierer lesbaren Konfigurationspfad angeben. Für die Wartungssperre des Servers bindest du deren Verzeichnis im Einsortierer nur lesbar ein und trägst den Containerpfad unter `SERIES_MAINTENANCE_LOCK_DIR` ein.
+
+Bei einem selbst gebauten Stack mit bestehendem `runtime`-Ordner startet der aktualisierte Worker zuerst. Er legt die beiden Zustandsunterverzeichnisse für das Profil an. Die Einrichtung einzelner Importquellen und die Behandlung bereits katalogisierter Titel sind in der [Hörspiel-Anleitung](SERIES.md) beschrieben.

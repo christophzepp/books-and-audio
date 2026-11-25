@@ -169,6 +169,18 @@ class SyncIntegrationTests(unittest.TestCase):
         self.bridge.save(self.mapping["abs_id"], {"baseline": pair})
         return pair
 
+    def test_bookorbit_scope_requires_common_start_even_when_old_baseline_exists(self):
+        self.assertEqual(self.cycle()['unchanged'], 1)
+        self.bridge.config['_bookorbit_activation'] = 'after-switch'
+        self.abs.set(25)
+        self.assertTrue(self.cycle()['blocked'])
+        self.assertFalse(self.abs.writes or self.bo.writes)
+        self.bo.set(25)
+        self.assertEqual(self.cycle()['unchanged'], 1)
+        self.bo.set(45)
+        self.assertEqual(self.cycle()['synced'], 1)
+        self.assertEqual(self.abs.raw['currentTime'], 45)
+
     def test_untouched_libraries_create_only_baseline(self):
         result = self.cycle()
         self.assertEqual(result["unchanged"], 1)

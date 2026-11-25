@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+from podcast_media_queue import FileCheckScheduled, require_file_check
 import stat
 import time
 import uuid
@@ -217,9 +218,10 @@ class PineMetadataRepair:
     def _source(self, mapping):
         from podcast_sync import settings
         from io_metrics import increment
-        increment(self.b, 'podcast_metadata_source_checks')
+        require_file_check(self.b, mapping)
         current = api_source(self.b, mapping)
         cfg = settings(self.b)
+        increment(self.b, 'podcast_metadata_source_checks')
         worker = Path(mapping['worker_path'])
         root = Path(cfg['worker_root'])
         if (not worker.is_absolute() or not root.is_absolute() or worker.resolve() != worker
@@ -398,6 +400,8 @@ class PineMetadataRepair:
                 return result('waiting', 'metadata_repair_readback_changed')
             self._persist(key, intent, 'verified', 'measured_duration_repaired')
             return result('corrected', 'measured_duration_repaired', duration=target)
+        except FileCheckScheduled:
+            return result('waiting', 'media_check_scheduled')
         except Exception:
             # Exceptions can contain signed feed URLs from another API. Never
             # echo them to public status/event logs; the intent stays private.

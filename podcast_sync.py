@@ -19,10 +19,12 @@ import uuid
 
 from jellyfin_audio import TICKS, choose, rows_equal, same
 from pinepods_client import action_epoch, EpisodeUnavailable
+from podcast_media_queue import PodcastFileChecks, FileCheckScheduled
 from podcast_policy import validate_primary, preferred_change
 
 NAMESPACE = '_podcast:'
 PINE_REASONS = {
+    'media_check_scheduled': 'Die Dateiprüfung ist für die Medienwartung vorgemerkt.',
     'feed_missing': 'PinePods has not subscribed to the exact podcast feed.',
     'feed_ambiguous': 'The exact podcast feed is ambiguous in PinePods.',
     'episode_missing': 'The exact episode is not available in PinePods.',
@@ -462,7 +464,10 @@ class PodcastCoordinator:
             # Live guards do not mutate remote catalogs. Keep their cycle
             # snapshots and temporarily expose original clients instead.
             with self.live():
-                return self._variant_proof(mapping,refresh=refresh,apply=apply,force_source=force_source,authorize=authorize)
+                try:
+                    return self._variant_proof(mapping,refresh=refresh,apply=apply,force_source=force_source,authorize=authorize)
+                except FileCheckScheduled:
+                    return {'ready':False,'fresh':False,'reason':'media_check_scheduled'}
         with self.observing():
             return self._variant_proof(mapping, refresh=refresh, apply=apply, force_source=force_source, authorize=authorize)
 
@@ -709,6 +714,8 @@ class PodcastCoordinator:
         if metadata_pending:
             outcome = self.repair_metadata(mapping, apply)
             if outcome['outcome'] != 'corrected':
+                if outcome.get('reason')=='media_check_scheduled' and (enrolled or not optional):
+                    raise FileCheckScheduled(PINE_REASONS['media_check_scheduled'])
                 code = 'metadata_repair_pending'
         if code:
             if enrolled or not optional:
@@ -739,6 +746,12 @@ class PodcastCoordinator:
                 raise ValueError('Reviewed PinePods alias normal media guard failed') from None
             if exc.reason == 'duration_mismatch' and apply and not pending:
                 outcome = self.repair_metadata(mapping, apply)
+                if outcome.get('reason')=='media_check_scheduled':
+                    if enrolled or not optional:
+                        raise FileCheckScheduled(PINE_REASONS['media_check_scheduled']) from None
+                    mapping.update(_pine_selected=False, _pine_status='waiting',
+                                   _pine_reason_code='media_check_scheduled')
+                    return self.observe_read(mapping)
                 if outcome['outcome'] in ('corrected', 'nochange'):
                     # All normal duration, receipt and conflict checks run
                     # again; a metadata repair is never a progress approval.
@@ -802,6 +815,13 @@ class PodcastCoordinator:
                 # Recovery checks fresh API identities against historical media
                 # evidence; progress changes alone must not reopen media files.
                 proof=self.variant_proof(mapping,refresh=False,apply=apply,authorize=bool(recovering))
+                if recovering and apply and proof.get('reason') == 'media_check_scheduled':
+                    # A cold readback never stats media in the transfer guard.
+                    # Warm the observational proof in maintenance, then obtain
+                    # a new live authorization for the original journal.
+                    observed=self.variant_proof(mapping,refresh=False,apply=True)
+                    if observed.get('ready'):
+                        proof=self.variant_proof(mapping,refresh=False,apply=True,authorize=True)
                 if not proof.get('ready') and not recovering:
                     proof=self.variant_proof(mapping,refresh=apply,apply=apply)
                 if proof.get('ready'):
@@ -1114,6 +1134,11 @@ class PodcastCoordinator:
         for (key,) in self.b.db.execute("SELECT DISTINCT book FROM operations WHERE book LIKE ? AND status='pending'", (STATUS_NAMESPACE+'%',)):
             if key.startswith(STATUS_NAMESPACE) and key[len(STATUS_NAMESPACE):] not in live:orphaned.append(key)
         if orphaned: raise RuntimeError('An unavailable podcast episode has an unresolved transfer')
+        file_checks = PodcastFileChecks(self.b, apply)
+        mappings = file_checks.maintenance_order(mappings)
+        listed = live | {row['id'] for row in issues}
+        for removed in set(file_checks.entries) - listed:
+            file_checks.discard(removed)
         result = dict(at=dt.datetime.now(dt.timezone.utc).isoformat(), enabled=True, mode='apply' if apply else 'dry-run',
             scope_fingerprint=fingerprint(sorted((m['id'],m['fingerprint'],m['jf']['fingerprint'],m.get('abs_guid'),
                 m.get('feed_url'),m.get('enclosure_url')) for m in mappings)),
@@ -1132,7 +1157,12 @@ class PodcastCoordinator:
                        participants=['abs','jf'] + (['pinepods','gpodder'] if self.pine else []),
                        pine_status='joining' if self.pine else 'disabled',reviewed_route=self.b.load('_pine_transition:'+mapping['id']).get('mode')=='personal_route')
             try:
-                action, states = self.handle(mapping, apply, settle)
+                with file_checks.episode(mapping) as check:
+                    action, states = self.handle(mapping, apply, settle)
+                if mapping.get('_pine_status') in ('joining','enrolled','disabled') and not check.deferred:
+                    file_checks.complete(mapping['id'])
+                elif check.deferred:
+                    mapping['_pine_reason_code'] = 'media_check_scheduled'
                 result[action] += 1
                 base = states['abs']
                 row.update(position=base['position'], status=base['status'], progress_status=action,
@@ -1141,6 +1171,10 @@ class PodcastCoordinator:
                 if (mapping.get('_pine_selected') and apply
                         and has_pine_history(self.b.load(mapping['id']).get('baseline'))):
                     mapping['_pine_status'] = 'enrolled'
+            except FileCheckScheduled:
+                result['waiting'] += 1
+                mapping.update(_pine_status='waiting', _pine_reason_code='media_check_scheduled')
+                row.update(progress_status='waiting',reason=PINE_REASONS['media_check_scheduled'])
             except Exception as exc:
                 reason = str(exc) if isinstance(exc, (ValueError, RuntimeError, EpisodeUnavailable)) or type(exc).__name__ == 'RequestError' else type(exc).__name__
                 row.update(progress_status='blocked', reason=reason)
@@ -1172,6 +1206,7 @@ class PodcastCoordinator:
             result['episodes'].append(row)
         for status in ('waiting','enrolled','joining','blocked'):
             result['pine_'+status] = sum(row.get('pine_status') == status for row in result['episodes'])
+        result['file_checks_pending'] = file_checks.pending_count
         result['ok'] = not result['blocked']
         return result
 

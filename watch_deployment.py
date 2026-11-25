@@ -8,7 +8,9 @@ Native-mode configuration checks
 return SQL-derived booleans only; credential values never leave the database.
 """
 from concurrent.futures import ThreadPoolExecutor
+import copy
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -18,6 +20,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import PurePosixPath
+from urllib.parse import urlsplit
 
 
 ROW_FIELDS = frozenset({'abs_id', 'audio_source', 'audio_source_id',
@@ -107,10 +110,11 @@ def bookbridge_policy(config):
             raise DeploymentError('Detached policy must not retain BookBridge settings')
         mappings = config.get('mappings')
         pins = config.get('native_readalong')
-        if (not isinstance(mappings, list) or not mappings
-                or any(not isinstance(m, dict) for m in mappings)
+        if (not isinstance(mappings, list) or any(not isinstance(m, dict) for m in mappings)
                 or not isinstance(pins, dict)):
-            raise DeploymentError('Detached policy requires audio mappings and native EPUB pins')
+            raise DeploymentError('Detached policy requires an explicit audio mapping list and native EPUB pin object')
+        # An explicitly empty inventory can start discovery. Every retained pin,
+        # including one left behind after removal, still needs its original pair.
         from mapping import validate_native_readalong
         for abs_id, pin in pins.items():
             if (not isinstance(abs_id, str) or not abs_id or abs_id != abs_id.strip()
@@ -201,6 +205,8 @@ def validate_containers(containers, config):
                 or media[0].get('Source') != spec['media_source']):
             raise DeploymentError('Media mount changed: ' + name)
         if name == 'bookorbit':
+            if 'bookorbit_instance' in config and bookorbit_runtime(container, bookorbit_instance_policy(config)) != config.get('_observed_bookorbit'):
+                raise DeploymentError('BookOrbit instance changed during verification')
             env = container.get('Config', {}).get('Env') if isinstance(container.get('Config'), dict) else None
             if not isinstance(env, list) or any(not isinstance(v, str) for v in env):
                 raise DeploymentError('Invalid BookOrbit version snapshot')
@@ -283,6 +289,9 @@ def validate_ebook_mounts(containers, config):
         raise DeploymentError('Incomplete ebook mount snapshot')
     for c in containers:
         name = c['Name'][1:]
+        if name == 'bookorbit' and 'bookorbit_instance' in config:
+            if bookorbit_runtime(c, bookorbit_instance_policy(config)) != config.get('_observed_bookorbit'):
+                raise DeploymentError('BookOrbit process changed during ebook mount verification')
         root = PurePosixPath(spec['bo_root'] if name == 'bookorbit' else spec['jf_root'])
         image = config['deployment']['bookorbit']['image'] if name == 'bookorbit' else spec['jf_image']
         if c.get('Image') != image or c.get('State', {}).get('Status') != 'running':
@@ -298,6 +307,8 @@ def validate_ebook_mounts(containers, config):
 
 
 def check_deployment(config, runner=subprocess.run):
+    if 'bookorbit_instance' in config and '_observed_bookorbit' not in config:
+        config, _ = resolve_bookorbit_instance(config, runner)
     policy = bookbridge_policy(config)
     detached = policy is not None and policy['phase'] == 'detached'
     names = ['audiobookshelf', 'bookorbit'] + (['bookbridge'] if policy and not detached else [])
@@ -325,6 +336,104 @@ def _canonical_absolute_path(value):
             or str(PurePosixPath(value)) != value):
         raise DeploymentError('Invalid BookBridge media root configuration')
     return PurePosixPath(value)
+
+
+BOOKORBIT_REPOSITORY = 'ghcr.io/bookorbit/bookorbit'
+BOOKORBIT_VERSION = re.compile(r'v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?')
+
+
+def bookorbit_instance_policy(config):
+    """Explicit opt-in on the host. A tag alone is never evidence of origin."""
+    spec = config.get('bookorbit_instance')
+    keys = {'repository', 'compose_project', 'compose_service', 'data_source', 'api_origin', 'user_id', 'libraries'}
+    if (not isinstance(spec, dict) or set(spec) != keys or spec['repository'] != BOOKORBIT_REPOSITORY
+            or any(not isinstance(spec[k], str) or not CONTAINER_NAME.fullmatch(spec[k])
+                   for k in ('compose_project', 'compose_service'))):
+        raise DeploymentError('Invalid BookOrbit instance enrollment')
+    _canonical_absolute_path(spec['data_source'])
+    try:
+        origin = urlsplit(spec['api_origin'])
+        valid_origin = (origin.scheme in ('https', 'http') and origin.hostname and not origin.username
+                        and not origin.password and origin.path in ('', '/') and not origin.query and not origin.fragment)
+        _ = origin.port
+    except (TypeError, ValueError):
+        valid_origin = False
+    if (not valid_origin or type(spec['user_id']) not in (int, str)
+            or not re.fullmatch(r'[1-9][0-9]*', str(spec['user_id']))):
+        raise DeploymentError('Invalid BookOrbit API identity')
+    libraries = spec['libraries']
+    if not isinstance(libraries, list) or not 1 <= len(libraries) <= 100:
+        raise DeploymentError('Invalid BookOrbit library enrollment')
+    ids = set()
+    for row in libraries:
+        if (not isinstance(row, dict) or set(row) != {'id', 'roots'} or type(row['id']) is not int
+                or row['id'] <= 0 or row['id'] in ids or not isinstance(row['roots'], list)
+                or not 1 <= len(row['roots']) <= 100):
+            raise DeploymentError('Invalid BookOrbit library enrollment')
+        roots = {_canonical_absolute_path(value) for value in row['roots']}
+        if len(roots) != len(row['roots']):
+            raise DeploymentError('Duplicate BookOrbit library root')
+        ids.add(row['id'])
+    return spec
+
+
+def bookorbit_policy_digest(spec):
+    infrastructure = {key: spec[key] for key in ('repository', 'compose_project', 'compose_service',
+                                                  'data_source', 'api_origin')}
+    return hashlib.sha256(json.dumps(infrastructure, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def bookorbit_runtime(container, spec):
+    """Bind the running healthy process, Compose identity and persistent data directory."""
+    base, state = container.get('Config', {}), container.get('State', {})
+    labels = base.get('Labels') or {}
+    reference = base.get('Image')
+    repo = re.escape(spec['repository'])
+    if (container.get('Name') != '/bookorbit' or state.get('Status') != 'running'
+            or (state.get('Health') or {}).get('Status') != 'healthy'
+            or not isinstance(reference, str) or not re.fullmatch(repo
+                + r'(?::[\w][\w.-]{0,127})?(?:@sha256:[a-f0-9]{64})?', reference)
+            or labels.get('com.docker.compose.project') != spec['compose_project']
+            or labels.get('com.docker.compose.service') != spec['compose_service']):
+        raise DeploymentError('BookOrbit container origin, health or Compose identity changed')
+    data = [mount for mount in container['Mounts'] if mount.get('Destination') == '/data']
+    if (len(data) != 1 or data[0].get('Type') != 'bind' or data[0].get('Source') != spec['data_source']
+            or any(str(mount.get('Destination', '')).startswith('/data/') for mount in container['Mounts'])):
+        raise DeploymentError('BookOrbit persistent data mount changed')
+    versions = [entry.partition('=')[2] for entry in base['Env'] if entry.startswith('APP_VERSION=')]
+    if (len(versions) != 1 or not BOOKORBIT_VERSION.fullmatch(versions[0])
+            or not IMAGE_PATTERN.fullmatch(container.get('Image', ''))
+            or not re.fullmatch(r'[0-9a-f]{64}', container.get('Id', ''))
+            or not isinstance(state.get('StartedAt'), str) or not state['StartedAt']):
+        raise DeploymentError('BookOrbit running process or version is unavailable')
+    return {'image': container['Image'], 'version': versions[0], 'container_id': container['Id'],
+            'started_at': state['StartedAt'], 'profile_digest': bookorbit_policy_digest(spec)}
+
+
+def resolve_bookorbit_instance(config, runner):
+    """Resolve a reviewed instance for this receipt only; never persist generated image pins."""
+    spec = bookorbit_instance_policy(config)
+    def inspect(command):
+        result = runner(command, capture_output=True, text=True, timeout=20, check=True)
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+            raise DeploymentError('Incomplete BookOrbit inspection')
+        return rows[0]
+    runtime = bookorbit_runtime(inspect(['docker', 'inspect', 'bookorbit']), spec)
+    image = inspect(['docker', 'image', 'inspect', runtime['image']])
+    digests = image.get('RepoDigests')
+    if (image.get('Id') != runtime['image'] or not isinstance(digests, list)
+            or not any(isinstance(ref, str) and re.fullmatch(re.escape(spec['repository'])+r'@sha256:[0-9a-f]{64}', ref)
+                       for ref in digests)):
+        raise DeploymentError('Running BookOrbit image lacks the enrolled registry digest')
+    effective = copy.deepcopy(config)
+    effective['deployment']['bookorbit'].update(image=runtime['image'], version=runtime['version'])
+    if 'bo' in effective.get('folder_deployment', {}):
+        if effective['folder_deployment']['bo'].get('container') != 'bookorbit':
+            raise DeploymentError('BookOrbit folder container identity changed')
+        effective['folder_deployment']['bo']['image'] = runtime['image']
+    effective['_observed_bookorbit'] = runtime
+    return effective, runtime
 
 
 def bookbridge_deployment_policy(config):
@@ -620,6 +729,9 @@ def _validate_folder_containers_strict(containers, config):
             raise DeploymentError('Unexpected or duplicate folder container')
         seen.add(name)
         endpoint = names[name]
+        if endpoint == 'bo' and 'bookorbit_instance' in config:
+            if bookorbit_runtime(container, bookorbit_instance_policy(config)) != config.get('_observed_bookorbit'):
+                raise DeploymentError('BookOrbit process changed during folder verification')
         if (container.get('Image') != specs[endpoint]['image']
                 or not isinstance(container.get('State'), dict)
                 or container['State'].get('Status') != 'running'):
@@ -781,6 +893,52 @@ def validate_folder_aliases(config, gate, now=None):
     return True
 
 
+def resolve_dockge_worker(config, runner):
+    """A verified upgrade of the opt-in official beta still owns the same read-only mounts."""
+    if 'dockge_worker_channel' not in config:
+        return config
+    if config['dockge_worker_channel'] != 'beta':
+        raise DeploymentError('Unknown Dockge worker release channel')
+    name = 'book-progress-sync'
+    repo = 'ghcr.io/christophzepp/books-and-audio'
+    reference = repo + ':beta'
+
+    def inspect(kind, identifier):
+        response = runner(['docker', kind, 'inspect', identifier], capture_output=True,
+                          text=True, timeout=10, check=True)
+        rows = json.loads(response.stdout)
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+            raise DeploymentError('Incomplete Dockge worker inspection')
+        return rows[0]
+
+    container = inspect('container', name)
+    image = inspect('image', reference)
+    runtime = container.get('Config', {})
+    labels = runtime.get('Labels') or {}
+    release = image.get('Config', {}).get('Labels') or {}
+    destinations = [m.get('Destination') for m in container['Mounts']]
+    if (container.get('Name') != '/' + name or container['State'].get('Running') is not True
+            or runtime.get('Image') != reference or labels.get('com.docker.compose.project') != name
+            or labels.get('com.docker.compose.service') != name
+            or not IMAGE_PATTERN.fullmatch(image.get('Id', '')) or container['Image'] != image['Id']
+            or not any(isinstance(d, str) and re.fullmatch(re.escape(repo) + r'@sha256:[0-9a-f]{64}', d)
+                       for d in image.get('RepoDigests') or [])
+            or release.get('org.opencontainers.image.source') != 'https://github.com/christophzepp/books-and-audio'
+            or not re.fullmatch(r'[0-9a-f]{40}', release.get('org.opencontainers.image.revision', ''))
+            or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+', release.get('org.opencontainers.image.version', ''))
+            or any(not isinstance(d, str) or d in {'/', '/app'} or d.startswith('/app/') for d in destinations)):
+        raise DeploymentError('Dockge worker differs from the official installed beta')
+    resolved = copy.deepcopy(config)
+    for group, entry in (('folder_deployment', 'worker'), ('podcast_deployment', 'worker'),
+                         ('bookbridge_deployment', name)):
+        if group in resolved:
+            row = resolved[group][entry]
+            if row.get('container', name) != name:
+                raise DeploymentError('Dockge worker enrollment refers to another container')
+            row['image'] = image['Id']
+    return resolved
+
+
 def _safe_check(check, config, runner):
     try:
         return True, check(config, runner)
@@ -796,7 +954,7 @@ def _collect_gate(root, runner, clock):
             'bookbridge_reason': 'BookBridge deployment is not configured',
             'folder_gate_ok': False, 'folder_reason': 'Folder deployment is not configured'}
     try:
-        config = json.loads((root / 'config/config.json').read_text())
+        config = resolve_dockge_worker(json.loads((root / 'config/config.json').read_text()), runner)
     except Exception as exc:
         gate['reason'] = str(exc) if isinstance(exc, DeploymentError) else type(exc).__name__
         return gate
@@ -814,8 +972,31 @@ def _collect_gate(root, runner, clock):
     # Each group keeps its own ordered checks and 20s subprocess deadlines.
     # Running independent groups together avoids adding all their timeouts to
     # the age of one shared receipt. No worker mutates the gate or config.
-    with ThreadPoolExecutor(max_workers=len(checks)) as pool:
-        pending = [(flag, reason, pool.submit(_safe_check, check, config, runner))
+    opted = isinstance(config, dict) and 'bookorbit_instance' in config
+    with ThreadPoolExecutor(max_workers=len(checks) + int(opted)) as pool:
+        resolution = pool.submit(_safe_check, resolve_bookorbit_instance, config, runner) if opted else None
+        def run_check(flag, check):
+            if resolution is None or flag not in ('ok', 'folder_gate_ok'):
+                return _safe_check(check, config, runner)
+            passed, result = resolution.result()
+            if passed:
+                return _safe_check(check, result[0], runner)
+            if flag == 'ok':
+                return False, result
+            # A missing BookOrbit must allow independent providers to check
+            # their own folders. Never fall back to a stale BookOrbit pin.
+            folders = config.get('folder_deployment')
+            if not isinstance(folders, dict) or 'bo' not in folders:
+                return _safe_check(check, config, runner)
+            retained = {endpoint: entry for endpoint, entry in folders.items() if endpoint != 'bo'}
+            if not retained:
+                return True, ({}, {'bo': result})
+            checked, other = _safe_check(check, dict(config, folder_deployment=retained), runner)
+            if not checked:
+                return False, other
+            receipts, errors = other
+            return True, (receipts, dict(errors, bo=result))
+        pending = [(flag, reason, pool.submit(run_check, flag, check))
                    for flag, reason, check in checks]
         for flag, reason, future in pending:
             passed, result = future.result()
@@ -824,7 +1005,9 @@ def _collect_gate(root, runner, clock):
                 continue
             gate[flag] = result if flag == 'pinepods_ok' else True
             gate.pop(reason, None)
-            if flag == 'podcasts_ok':
+            if flag == 'ok' and resolution is not None:
+                gate['bookorbit_instance'] = resolution.result()[1][1]
+            elif flag == 'podcasts_ok':
                 gate['podcast_mounts'] = result
             elif flag == 'folder_gate_ok':
                 gate['folder_mounts'], gate['folder_errors'] = result
@@ -838,7 +1021,7 @@ def _collect_gate(root, runner, clock):
         for flag, reason, _ in checks:
             gate[flag] = False
             gate[reason] = 'Deployment verification expired before publication'
-        for field in ('podcast_mounts', 'folder_mounts', 'folder_errors'):
+        for field in ('podcast_mounts', 'folder_mounts', 'folder_errors', 'bookorbit_instance'):
             gate.pop(field, None)
     return gate
 

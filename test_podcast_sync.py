@@ -387,7 +387,8 @@ class Tests(unittest.TestCase):
             with self.subTest(reason=reason), patch.object(pine,'read_episode',side_effect=EpisodeUnavailable(reason)):
                 result=self.cycle()
                 self.okay(result)
-                self.assertEqual(result['episodes'][0]['pine_reason_code'],reason)
+                expected = 'media_check_scheduled' if reason=='duration_mismatch' else reason
+                self.assertEqual(result['episodes'][0]['pine_reason_code'],expected)
                 self.assertEqual(set(self.load('_podcast:show:episode')['baseline']),{'abs','jf'})
         self.assertFalse(pine.writes or self.abs.writes or self.jf.writes)
 
@@ -519,8 +520,9 @@ class Tests(unittest.TestCase):
         self.abs.set(70);n=len(self.jf.writes)
         with patch.object(pine,'read_episode',side_effect=EpisodeUnavailable('duration_mismatch')):
             result=self.cycle()
-        self.assertTrue(result['blocked'])
-        self.assertEqual(result['episodes'][0]['pine_status'],'blocked')
+        self.assertEqual(result['waiting'],1)
+        self.assertEqual(result['episodes'][0]['pine_status'],'waiting')
+        self.assertEqual(result['episodes'][0]['pine_reason_code'],'media_check_scheduled')
         self.assertEqual(len(self.jf.writes),n)
         self.assertEqual(self.load('_podcast:show:episode')['baseline'],baseline)
 
