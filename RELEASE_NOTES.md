@@ -1,3 +1,9 @@
+## 0.1.0-beta.15 – Hörspielimporte auf mergerfs
+
+Der Hörspiel-Organizer unterstützt Medienpools, auf denen Hardlinks funktionieren und der exklusive Verzeichniswechsel mit `EINVAL` scheitert. Vor der Freigabe einer Folge prüft er die beteiligten Dateien. Bereits belegte Ziele mit abweichendem Inhalt führen zu einem Konflikt.
+
+Docker-Image für AMD64 und ARM64 `ghcr.io/christophzepp/books-and-audio:0.1.0-beta.15`. [Betrieb und Importwege](SERIES.md)
+
 ## 0.1.0-beta.14 – Podcast-Dateiprüfungen ab 22 Uhr und Hörspielserien
 
 - Automatische Dateiprüfungen für PinePods landen pro betroffener Folge in der SQLite-Datenbank des Workers auf der SSD. Das voreingestellte Wartungsfenster läuft von 22 bis 0 Uhr in Europe/Berlin. Pro Durchlauf können bis zu drei Folgen geprüft werden. Ein Neustart erhält die Vormerkungen und die bereits in diesem Fenster begonnenen Prüfungen.

@@ -19,7 +19,7 @@ Die neue Instanz beginnt mit leerer Bibliothek und pausierter Synchronisation. D
 
 In Dockge beim bestehenden Stack **Update/Aktualisieren** wählen. Docker lädt den aktuellen Tag `ghcr.io/christophzepp/books-and-audio:beta` und ersetzt die Container. Konto, Schlüssel, Verbindungen und Fortschrittsdaten liegen in den fünf persistenten Volumes des Stacks. Verwende bei Updates denselben Stacknamen. Bei einem Update bleiben der vorhandene Schlüssel und die gewählte Sync-Pause erhalten.
 
-Über die Kommandozeile entsprechen dem `docker compose pull` und anschließend `docker compose up -d`. Wenn du bei einer bestimmten Version bleiben möchtest, setze in Dockge `BOOKS_AUDIO_IMAGE=ghcr.io/christophzepp/books-and-audio:0.1.0-beta.14`. Jeder Container-Release enthält die dazugehörige Compose-Datei.
+Über die Kommandozeile entsprechen dem `docker compose pull` und anschließend `docker compose up -d`. Wenn du bei einer bestimmten Version bleiben möchtest, setze in Dockge `BOOKS_AUDIO_IMAGE=ghcr.io/christophzepp/books-and-audio:0.1.0-beta.15`. Jeder Container-Release enthält die dazugehörige Compose-Datei.
 
 ## Eigene Bibliotheken anbinden
 

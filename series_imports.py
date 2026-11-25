@@ -1,4 +1,5 @@
 """Completed radio-drama imports. Keep the producer's registered media in place."""
+import errno
 import hashlib
 import json
 import os
@@ -110,6 +111,7 @@ class ImportQueue:
         self.file.touch(mode=0o600, exist_ok=True)
         with self.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS imports (id TEXT PRIMARY KEY, receipt TEXT NOT NULL, state TEXT NOT NULL, reason TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS publications (id TEXT PRIMARY KEY, proof TEXT NOT NULL, ready INTEGER NOT NULL DEFAULT 0)')
 
     @contextmanager
     def connect(self):
@@ -130,30 +132,44 @@ class ImportQueue:
 
     def queued(self):
         with self.connect() as db:
-            return [(key, json.loads(raw)) for key, raw in db.execute("SELECT id,receipt FROM imports WHERE state='queued' ORDER BY rowid LIMIT 50")]
+            return [(key, json.loads(raw)) for key, raw in db.execute("SELECT id,receipt FROM imports WHERE state='queued' OR (state='done' AND id IN (SELECT id FROM publications WHERE ready=2)) ORDER BY rowid LIMIT 50")]
 
     def mark(self, key, status, reason=None):
         with self.connect() as db:
             db.execute('UPDATE imports SET state=?,reason=? WHERE id=?', (status, reason, key))
+            if status == 'done':
+                db.execute('DELETE FROM publications WHERE id=?', (key,))
+
+    def publication(self, key):
+        with self.connect() as db:
+            row = db.execute('SELECT proof,ready FROM publications WHERE id=?', (key,)).fetchone()
+        return (json.loads(row[0]), int(row[1])) if row else None
 
     def conflicts(self):
         with self.connect() as db:
             return db.execute("SELECT COUNT(*) FROM imports WHERE state='conflict'").fetchone()[0]
 
 
-def manifest(fd, prefix='', result=None):
+def manifest(fd, prefix='', result=None, *, ignore=None, directories=None):
     if result is None:
         result = {}
     with os.scandir(fd) as entries:
         for entry in entries:
             name = prefix + entry.name
+            if name in ('.ignore', '.books-audio-publish') and ignore is not None:
+                info = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_size or (info.st_dev, info.st_ino) != ignore:
+                    raise Defer('Scanner-Sperre gehört nicht zu diesem Auftrag')
+                continue
             components(name)
             info = entry.stat(follow_symlinks=False)
             if len(result) >= 4000 or len(name.split('/')) > 8:
                 raise Defer('Der Folgenordner ist zu groß')
             if stat.S_ISDIR(info.st_mode):
+                if directories is not None and name not in directories:
+                    raise Defer('Folgenziel enthält einen fremden Unterordner')
                 with open_dir(fd, [entry.name]) as child:
-                    manifest(child, name + '/', result)
+                    manifest(child, name + '/', result, ignore=ignore, directories=directories)
             elif stat.S_ISREG(info.st_mode) and PurePosixPath(name).suffix.casefold() in AUDIO | SIDECARS:
                 if info.st_size <= 0:
                     raise Defer('Import enthält eine leere Datei')
@@ -178,7 +194,7 @@ def exclude_from_libraries(root_fd):
                 os.close(fd)
 
 
-def publish(root_fd, key, job):
+def publish(root_fd, key, job, archive=None):
     # Each source owns its import folder. Only hard links are placed in the library.
     if not re.fullmatch('[a-f0-9]{64}', key):
         raise ValueError('Ungültiger Importbeleg')
@@ -193,7 +209,7 @@ def publish(root_fd, key, job):
         audio = {name for name in files if PurePosixPath(name).suffix.casefold() in AUDIO}
         if not audio or job['files'] is not None and audio != set(job['files']):
             raise Defer('Erfasste Audiodateien und Abschlussmeldung weichen voneinander ab')
-        return publish_files(root_fd, key, original, target, files, whole_folder=True)
+        return publish_files(root_fd, key, original, target, files, whole_folder=True, archive=archive)
 
 
 def selected_manifest(original, names):
@@ -208,7 +224,7 @@ def selected_manifest(original, names):
     return files
 
 
-def publish_arr(root_fd, key, event, resolved):
+def publish_arr(root_fd, key, event, resolved, archive=None):
     if event.get('source') not in ARR or not re.fullmatch('[a-f0-9]{64}', key):
         raise ValueError('Ungültiger nativer Arr-Beleg')
     folder, destination, sizes = resolved
@@ -220,11 +236,18 @@ def publish_arr(root_fd, key, event, resolved):
             raise Defer('Dateigröße entspricht nicht dem Katalog')
         # A flat author directory can contain files belonging to other books.
         # Only publish registered tracks; do not enumerate unowned neighbours.
-        return publish_files(root_fd, key, original, components(destination), files, whole_folder=False)
+        return publish_files(root_fd, key, original, components(destination), files, whole_folder=False, archive=archive)
 
 
-def publish_files(root_fd, key, original, target, files, *, whole_folder):
+def publish_files(root_fd, key, original, target, files, *, whole_folder, archive=None):
+    from series_publication import portable_publish
+    def current_source():
+        return manifest(original) if whole_folder else selected_manifest(original, files)
+
     with open_dir(root_fd, target[:-1], create=True) as parent:
+        if archive is not None and archive.publication(key):
+            with open_dir(root_fd, ['.series-work']) as work:
+                return portable_publish(archive, key, work, parent, original, target, files, current_source)
         try:
             with open_dir(parent, target[-1:]) as existing:
                 if manifest(existing) != files:
@@ -241,8 +264,13 @@ def publish_files(root_fd, key, original, target, files, *, whole_folder):
                     rel = components(name)
                     with open_dir(original, rel[:-1]) as src, open_dir(stage, rel[:-1], create=True) as dst:
                         os.link(rel[-1], rel[-1], src_dir_fd=src, dst_dir_fd=dst, follow_symlinks=False)
-                current = manifest(original) if whole_folder else selected_manifest(original, files)
+                current = current_source()
                 if manifest(stage) != files or current != files:
                     raise Defer('Import hat sich vor der Veröffentlichung geändert')
-            _rename_exclusive(work, key, parent, target[-1])
+            try:
+                _rename_exclusive(work, key, parent, target[-1])
+            except OSError as error:
+                if archive is None or error.errno not in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+                    raise
+                return portable_publish(archive, key, work, parent, original, target, files, current_source)
         return True

@@ -61,7 +61,9 @@ def run(archive, apply):
                     for key, job in pending:
                         try:
                             is_arr_event = job.get('kind') == 'arr-event'
-                            if is_arr_event:
+                            publication = archive.publication(key)
+                            pending_cleanup = publication and publication[1] == 2
+                            if is_arr_event and not pending_cleanup:
                                 from series_arr import lookup
                                 try:
                                     resolved = lookup(job)
@@ -75,10 +77,14 @@ def run(archive, apply):
                                 except OSError as error:
                                     errors.append('Hörspielordner: ' + type(error).__name__)
                                     break
-                            if is_arr_event:
-                                moved = publish_arr(root, key, job, resolved)
+                            if pending_cleanup:
+                                from series_publication import finish_committed
+                                finish_committed(root, archive, key, publication[0])
+                                moved = False
+                            elif is_arr_event:
+                                moved = publish_arr(root, key, job, resolved, archive)
                             else:
-                                moved = publish(root, key, job)
+                                moved = publish(root, key, job, archive)
                         except (OSError, ValueError, native.Defer) as error:
                             archive.mark(key, 'conflict', str(error)[:240])
                             continue
