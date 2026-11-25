@@ -75,6 +75,25 @@ class OpenDeliveriesTests(unittest.TestCase):
                   episodes={identity:entry} if verified else {})
         (self.root/'proof.json').write_text(json.dumps(data))
 
+    def test_old_open_event_uses_current_episode_labels_and_preserves_original_event(self):
+        self.item.pop('title')
+        self.item['show'] = 'Ursprüngliche Sendung'
+        self.block()
+        self.poll()
+        with self.relay.db() as db:
+            event_before = tuple(db.execute("SELECT event_id,snapshot,payload FROM native_tracking_events "
+                                            "WHERE kind='play'").fetchone())
+        self.item['title'] = '#371 – Aktueller Titel'
+        self.item.pop('show')
+        self.poll()
+        rows = self.page()['rows']
+        self.assertEqual([(row['episode_id'],row['title'],row['show']) for row in rows],
+                         [(self.item['id'],self.item['title'],'Ursprüngliche Sendung')])
+        self.assertEqual(rows[0]['code'],'tracking_rss_identity_ambiguous')
+        with self.relay.db() as db:
+            events = db.execute("SELECT event_id,snapshot,payload FROM native_tracking_events WHERE kind='play'").fetchall()
+        self.assertEqual([tuple(event) for event in events], [event_before])
+
     def test_open_ambiguous_case_counts_only_stock_polls_after_opt_in_and_notifies_once(self):
         self.block()
         self.poll()

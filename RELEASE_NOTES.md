@@ -1,3 +1,7 @@
+## 0.1.0-beta.19 – Folgentitel bei offenen Zustellungen
+
+Die Liste offener Floppy-Zustellungen zeigt Titel und Podcastnamen aus dem aktuellen PinePods-Bestand. Fehlt dort eine Angabe, übernimmt die Anzeige den Wert aus dem ursprünglichen Hörereignis.
+
 ## 0.1.0-beta.18 – Offene Zustellungen und Wiederherstellungsprobe
 
 - Die Podcastansicht bündelt offene Floppy-Zustellungen. Zu jeder betroffenen Folge lassen sich der letzte Versuch, der Grund und der nächste mögliche Schritt nachsehen. Die optionale Benachrichtigung berücksichtigt tatsächliche Floppy-Abrufe.

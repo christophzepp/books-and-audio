@@ -80,9 +80,12 @@ def collect(relay, db, account, target, scope_key, pref, now):
     enabled_since = pref.get('at', 0)
     cases = {}
     for event, episode, title, show, code, attempted, first, offered in relay.execute("""
-            SELECT o.event_id,e.episode_id,json_extract(e.snapshot,'$.title'),json_extract(e.snapshot,'$.show'),
+            SELECT o.event_id,e.episode_id,
+                   COALESCE(json_extract(s.snapshot,'$.title'),json_extract(e.snapshot,'$.title')),
+                   COALESCE(json_extract(s.snapshot,'$.show'),json_extract(e.snapshot,'$.show')),
                    o.reason,o.last_attempt_at,o.first_attempt_cursor,r.offered_at
             FROM native_outbox o CROSS JOIN native_tracking_events e ON e.event_id=o.event_id
+            LEFT JOIN native_tracking_episodes s ON s.id=e.episode_id
             LEFT JOIN native_delivery_receipts r ON r.event_id=o.event_id"""):
         polls, eligible = poll_window(relay, first, enabled_since)
         case = make_case(episode, title, show, code or ('offered' if offered else 'ready'),

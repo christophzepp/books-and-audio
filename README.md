@@ -1,6 +1,6 @@
 # Books & Audio
 
-**Öffentliche Beta · v0.1.0-beta.18**
+**Öffentliche Beta · v0.1.0-beta.19**
 
 Unter **Podcasts** findest du offene Zustellungen an Floppy mit Grund, letztem Versuch und einem Link zur Folge. Eine optionale Meldung weist auf ausstehende Zustellungen nach wiederholten Floppy-Abrufen hin. Die Übersicht zeigt außerdem das Ergebnis der letzten isolierten Wiederherstellungsprobe für Hauptdienst und gPodder-Relay. [Sicherung prüfen](RESTORE.md)
 
