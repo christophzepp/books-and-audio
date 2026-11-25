@@ -14,7 +14,7 @@
 </section>
 <div id="app-screen" class="app-shell" hidden>
   <aside class="sidebar"><a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true">↔</span><span>Books &amp; Audio<span class="brand-sub">Sync-Verwaltung</span></span></a>
-  <nav aria-label="Hauptnavigation"><button class="nav-item active" data-page="overview"><span aria-hidden="true">◫</span>Übersicht</button><button class="nav-item" data-page="books"><span aria-hidden="true">▤</span>Bücher</button><button class="nav-item" data-page="audiobooks"><span aria-hidden="true">♫</span>Hörbücher</button><button class="nav-item" data-page="podcasts"><span aria-hidden="true">◉</span>Podcasts</button><button class="nav-item" data-page="connections"><span aria-hidden="true">⇄</span>Verbindungen</button><button class="nav-item" data-page="folders"><span aria-hidden="true">▣</span>Medienordner</button><button class="nav-item" data-page="reviews"><span aria-hidden="true">✓</span>Freigaben<span id="review-count" class="nav-count" hidden></span></button><button class="nav-item" data-page="schedule"><span aria-hidden="true">◷</span>Zeitpläne</button><button class="nav-item" data-page="events"><span aria-hidden="true">≡</span>Protokoll</button></nav>
+  <nav aria-label="Hauptnavigation"><button class="nav-item active" data-page="overview"><span aria-hidden="true">◫</span>Übersicht</button><button class="nav-item" data-page="books"><span aria-hidden="true">▤</span>Bücher</button><button class="nav-item" data-page="audiobooks"><span aria-hidden="true">♫</span>Hörbücher</button><button class="nav-item" data-page="podcasts"><span aria-hidden="true">◉</span>Podcasts</button><button class="nav-item" data-page="connections"><span aria-hidden="true">⇄</span>Verbindungen</button><button class="nav-item" data-page="folders"><span aria-hidden="true">▣</span>Medienordner</button><button class="nav-item" data-page="reviews"><span aria-hidden="true">✓</span>Freigaben<span id="review-count" class="nav-count" hidden></span></button><button class="nav-item" data-page="schedule"><span aria-hidden="true">◷</span>Zeitpläne</button><button class="nav-item" data-page="activity"><span aria-hidden="true">▥</span>Medienzugriffe</button><button class="nav-item" data-page="events"><span aria-hidden="true">≡</span>Protokoll</button></nav>
   <div class="sidebar-bottom"><span class="privacy-dot"></span> Nur in deinem privaten Netz<button id="logout-button" class="quiet">Abmelden</button></div></aside>
   <main class="main"><header class="page-header"><div><p class="eyebrow">BIBLIOTHEKEN VERBINDEN</p><h1 id="page-title">Alles im Blick</h1><p id="page-description" class="muted">Hörpositionen und Lesestände, zuverlässig verbunden.</p></div><button id="refresh-button" class="secondary">Aktualisieren</button></header>
   <div id="global-message" class="notice" role="status" hidden></div>
@@ -35,10 +35,10 @@
   </section>
   <section id="page-books" class="page" hidden>
     <section id="ebook-import-section" class="panel" hidden><div class="panel-head"><div><h2>Offene E-Book-Importe</h2><p class="muted">Fehlgeschlagene Importe werden mit Abstand oder nach einer Dateiänderung erneut geprüft. Bereits zugeordnete Bücher laufen weiter.</p></div><button id="ebook-retry-all" class="secondary">Offene Importe erneut prüfen</button></div><p class="help">Eine ausdrückliche Prüfung kann auf die Medienfestplatte zugreifen. Hörstände und Freigaben bleiben erhalten.</p><div id="ebook-import-list" class="issue-list"></div></section>
-    <section class="panel"><div class="panel-head book-heading"><div><h2>Bücher</h2><p id="book-count" class="muted">Stand der letzten Rückmeldung.</p></div><div class="list-tools"><label class="search-label"><span class="sr-only">Bücher durchsuchen</span><input id="book-search" type="search" placeholder="Titel suchen …" autocomplete="off"></label><label class="compact-label">Ansicht<select id="book-filter"><option value="all">Alle anzeigen</option><option value="issues">Nur Fehler und Sperren</option></select></label></div></div><div class="table-scroll"><table class="book-table"><thead><tr><th scope="col">Titel</th><th scope="col">Art</th><th scope="col">Status</th><th scope="col">Fortschritt</th><th scope="col"><span class="sr-only">Aktion</span></th></tr></thead><tbody id="book-rows"></tbody></table></div><div id="book-empty" hidden></div></section>
+    <section class="panel"><div class="panel-head book-heading"><div><h2>Bücher</h2><p id="book-count" class="muted">Stand der letzten Rückmeldung.</p></div><div class="list-tools"><button id="book-missing" type="button" class="secondary">Fehlende Titel prüfen</button><label class="search-label"><span class="sr-only">Bücher durchsuchen</span><input id="book-search" type="search" placeholder="Titel suchen …" autocomplete="off"></label><label class="compact-label">Ansicht<select id="book-filter"><option value="all">Alle anzeigen</option><option value="issues">Nur Fehler und Sperren</option></select></label></div></div><div class="table-scroll"><table class="book-table"><thead><tr><th scope="col">Titel</th><th scope="col">Art</th><th scope="col">Status</th><th scope="col">Fortschritt</th><th scope="col"><span class="sr-only">Aktion</span></th></tr></thead><tbody id="book-rows"></tbody></table></div><div id="book-empty" hidden></div></section>
   </section>
   <section id="page-audiobooks" class="page" hidden>
-    <section class="panel"><div class="panel-head book-heading"><div><h2>Hörbücher</h2><p id="audio-count" class="muted">Stand der letzten Rückmeldung.</p></div><div class="list-tools"><label class="search-label"><span class="sr-only">Hörbücher durchsuchen</span><input id="audio-search" type="search" placeholder="Titel suchen …" autocomplete="off"></label><label class="compact-label">Ansicht<select id="audio-filter"><option value="all">Alle anzeigen</option><option value="issues">Nur Fehler und Sperren</option></select></label></div></div><div class="table-scroll"><table class="book-table"><thead><tr><th scope="col">Titel</th><th scope="col">Art</th><th scope="col">Status</th><th scope="col">Fortschritt</th><th scope="col"><span class="sr-only">Aktion</span></th></tr></thead><tbody id="audio-rows"></tbody></table></div><div id="audio-empty" hidden></div></section>
+    <section class="panel"><div class="panel-head book-heading"><div><h2>Hörbücher</h2><p id="audio-count" class="muted">Stand der letzten Rückmeldung.</p></div><div class="list-tools"><button id="audio-missing" type="button" class="secondary">Fehlende Titel prüfen</button><label class="search-label"><span class="sr-only">Hörbücher durchsuchen</span><input id="audio-search" type="search" placeholder="Titel suchen …" autocomplete="off"></label><label class="compact-label">Ansicht<select id="audio-filter"><option value="all">Alle anzeigen</option><option value="issues">Nur Fehler und Sperren</option></select></label></div></div><div class="table-scroll"><table class="book-table"><thead><tr><th scope="col">Titel</th><th scope="col">Art</th><th scope="col">Status</th><th scope="col">Fortschritt</th><th scope="col"><span class="sr-only">Aktion</span></th></tr></thead><tbody id="audio-rows"></tbody></table></div><div id="audio-empty" hidden></div></section>
   </section>
   <section id="page-connections" class="page" hidden>
     <section class="panel"><div class="panel-head"><div><h2>Deine Dienste</h2><p class="muted">Eingerichtete Profile und ihr aktueller Status.</p></div><button id="add-connection" class="primary">Verbindung hinzufügen</button></div>
@@ -115,6 +115,7 @@
           <label>Neue Importe prüfen alle (Sekunden)<input type="number" data-schedule="series_interval_seconds" min="300" max="604800" required></label>
         </div>
         <p id="schedule-series-status" class="help"></p>
+        <div id="schedule-series-conflicts"></div>
       </section>
       <section class="panel"><details class="podcast-settings"><summary>Weitere Prüfintervalle für Bücher und Medienordner</summary>
         <div class="schedule-fields">
@@ -135,6 +136,13 @@
       <p id="schedule-message" class="notice" role="status" hidden></p>
     </form>
   </section>
+  <section id="page-activity" class="page" hidden>
+    <section class="panel"><div class="panel-head"><h2>Messzeitraum</h2><label class="compact-label">Zeitraum<select id="activity-range"><option value="1">Letzte 24 Stunden</option><option value="7">Letzte 7 Tage</option></select></label></div>
+      <p id="activity-coverage" aria-live="polite"></p><dl id="activity-totals" class="folder-paths"></dl></section>
+    <section class="panel"><h2>Prüfungen nach Titel und Ordner</h2><div id="activity-items" class="event-list" aria-live="polite"></div><button id="activity-more" class="secondary" hidden>Ältere Prüfungen laden</button></section>
+    <section class="panel"><h2>Festplatten laut Linux-Kernel</h2><div id="activity-kernel-watcher"></div></section>
+    <section class="panel"><h2>Festplatten laut Serverwächter</h2><div id="activity-watcher"></div></section>
+  </section>
   <section id="page-events" class="page" hidden><section class="panel"><div class="panel-head"><div><h2>Aktivitäten</h2><p class="muted">Abgleiche, Verbindungsprüfungen und Freigaben.</p></div><div class="list-tools"><label class="compact-label">Ansicht<select id="event-filter"><option value="all">Alle Ereignisse</option><option value="attention">Hinweise und Fehler</option></select></label><button id="clear-events" class="secondary danger" disabled>Protokoll leeren</button></div></div><div id="event-list" class="event-list"></div></section></section>
   <footer id="last-refreshed">Noch nicht aktualisiert</footer></main>
 </div>
@@ -147,6 +155,11 @@
 <p id="episode-detail-help" class="help">Audiobookshelf und Jellyfin teilen die lokale Hörposition. PinePods übernimmt nur den Hörstatus. Ein Abschluss gilt am Ende der jeweiligen Fassung.</p>
 <p id="episode-error" class="form-error" role="alert"></p>
 <div class="dialog-actions"><button class="secondary" data-close="episode-dialog">Abbrechen</button><button id="episode-approve" class="primary" disabled>Statusabgleich freigeben</button></div></dialog>
+<dialog id="missing-dialog" class="wide-dialog" aria-labelledby="missing-heading">
+  <div class="dialog-head"><h2 id="missing-heading">Fehlende Titel prüfen</h2><button class="icon-button" data-close="missing-dialog" aria-label="Schließen">×</button></div>
+  <p id="missing-scope" class="muted"></p><p id="missing-status" role="status"></p><div id="missing-rows" class="issue-list"></div>
+  <div class="dialog-actions"><button class="secondary" data-close="missing-dialog">Schließen</button><button id="missing-apply" class="primary" disabled>Ausgewählte Zuordnungen entfernen</button></div>
+</dialog>
 <dialog id="confirm-dialog"><div class="dialog-head"><h2 id="confirm-title">Änderung bestätigen</h2></div><p id="confirm-description" class="muted"></p><div class="dialog-actions"><button id="confirm-cancel" class="secondary">Abbrechen</button><button id="confirm-accept" class="primary">Bestätigen</button></div></dialog>
 <div id="toast" class="toast" role="status" hidden></div>
 </body></html>
