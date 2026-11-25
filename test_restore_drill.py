@@ -110,6 +110,23 @@ class RestoreDrillTests(unittest.TestCase):
         for private in ('viewer','listener','test-secret','test-native-key','episode.mp3','pinepods:'):
             self.assertNotIn(private,json.dumps(report))
 
+    def test_pending_alias_request_and_applied_receipt_survive_restore(self):
+        cursor=self.relay/'state/relay.sqlite'
+        with closing(sqlite3.connect(cursor)) as db, db:
+            event_id,=db.execute("SELECT event_id FROM native_tracking_events WHERE kind='play' LIMIT 1").fetchone()
+            db.execute('CREATE TABLE IF NOT EXISTS native_address_approvals(event_id TEXT PRIMARY KEY,token TEXT,approved_at INTEGER)')
+            db.execute('INSERT INTO native_address_approvals VALUES(?,?,?)',(event_id,'a'*64,1700000001))
+        spool=self.stack/'state/control/tracking-alias'
+        spool.mkdir()
+        item=spool/(event_id+'.json')
+        request=dict(version=1,event_id=event_id,token='a'*64,approved_at=1700000000)
+        write_json(item,request)
+        self.archive()
+        self.assertTrue(self.result()['ok'])
+        write_json(item,dict(request,token='b'*64))
+        self.archive()
+        self.assertEqual(self.result()['error'],'relay_cursor')
+
     def test_public_volume_layout(self):
         self.archive(volume_names=True)
         self.assertTrue(self.result()['ok'])

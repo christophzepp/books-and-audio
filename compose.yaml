@@ -1,7 +1,7 @@
 name: books-and-audio
 x-service: &service
   build: .
-  image: books-and-audio:0.1.0-beta.19
+  image: books-and-audio:0.1.0-beta.20
   user: "${APP_UID:-1000}:${APP_GID:-1000}"
   init: true
   read_only: true
@@ -41,6 +41,27 @@ services:
     volumes:
       - ${DATA_DIR:-./runtime}/config:/config:ro
       - ${DATA_DIR:-./runtime}/state:/state
+
+  restore-check:
+    <<: *service
+    profiles: [restore]
+    restart: unless-stopped
+    network_mode: none
+    command: [python, restore_scheduler.py, --loop]
+    tmpfs: [/tmp:rw,nosuid,nodev,mode=1777,size=1g]
+    environment:
+      RESTORE_PRIMARY_ORIGIN: "${RESTORE_PRIMARY_ORIGIN:-}"
+      RESTORE_RELAY_ORIGIN: "${RESTORE_RELAY_ORIGIN:-}"
+    volumes:
+      - type: bind
+        source: ${RESTORE_BACKUP_CATALOG:-./restore-backups}
+        target: /backups
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${DATA_DIR:-./runtime}/state/control/restore-check
+        target: /result
+        bind: {create_host_path: false}
 
   series-organizer:
     <<: *service

@@ -23,6 +23,13 @@ class ResolverTests(unittest.TestCase):
   with self.assertRaises(ValueError):r.resolve({'podcast':F,'episode':'https://media.example.test/else.mp3'})
  def test_untrusted_xml_entities_are_rejected(self):
   with self.assertRaises(ValueError):parse_feed(b'<!DOCTYPE rss [<!ENTITY a "x">]><rss/>')
+ def test_second_item_without_enclosure_cannot_reuse_another_items_guid(self):
+  r=self.resolver('<rss><item><guid>A</guid><enclosure url="'+U+'"/></item><item><guid>A</guid></item></rss>')
+  with self.assertRaisesRegex(ValueError,'ambiguous'):r.resolve({'podcast':F,'episode':U})
+ def test_alias_with_wrong_guid_at_previously_approved_new_url_remains_blocked(self):
+  old='https://media.example.test/old';r=self.resolver('<rss><item><guid>NEW OWNER</guid><enclosure url="'+U+'"/></item></rss>',
+      [{'feed':F,'old':old,'new':U,'guid':'ORIGINAL'}])
+  with self.assertRaisesRegex(ValueError,'changed'):r.resolve({'podcast':F,'episode':old})
  def test_atom_enclosures_are_supported(self):
   self.assertEqual(parse_feed(('<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>urn:one</id><link rel="enclosure" href="'+U+'"/></entry></feed>').encode()),[{'episode':U,'guid':'urn:one'}])
 if __name__=='__main__':unittest.main()

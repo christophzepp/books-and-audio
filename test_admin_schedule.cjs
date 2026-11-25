@@ -30,13 +30,27 @@ function form() {
     requests.push([kind, JSON.parse(JSON.stringify(payload))]);
     return {revision: 11, values: {...state.status.schedule.values, ...payload.changes}};
   };
-  const context = vm.createContext({$,text,state,runCommand,epoch:()=>0});
+  const context = vm.createContext({$,text,state,runCommand,epoch:()=>0,formatDate:String});
   vm.runInContext(formSource,context);
   context.renderSchedule();
-  return {$,fields,state,requests,refresh:context.renderSchedule,
+  return {$,fields,state,requests,input,refresh:context.renderSchedule,
     change: () => $('schedule-form').input(),
     submit: () => $('schedule-form').submit({preventDefault() {}})};
 }
+
+test('scheduled restore edits preserve unrelated settings and show an overdue check in the GUI', async()=>{
+  const h=form();
+  const enabled=h.input('checkbox','restore_enabled'), days=h.input('number','restore_interval_days');
+  h.fields.push(enabled,days);
+  Object.assign(h.state.status.schedule.values,{restore_enabled:true,restore_interval_days:7});
+  h.state.status.restore_drill={schedule:{state:'not_running',error:'not_running',next_at:123}};
+  h.refresh();
+  assert.match(h.$('schedule-restore-status').textContent,/überfällig/);
+  assert.match(h.$('schedule-restore-status').textContent,/123/);
+  assert.equal(enabled.checked,true);
+  days.value='14';h.change();await h.submit();
+  assert.deepEqual(h.requests,[['schedule.update',{expected_revision:10,changes:{restore_interval_days:14}}]]);
+});
 
 test('a background refresh preserves an edit and the revision the operator actually reviewed',async () => {
   const h=form();

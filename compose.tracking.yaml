@@ -13,6 +13,10 @@ services:
     volumes:
       - ./tracking/config.json:/tracking/config.json:ro
       - ./tracking/state:/tracking/state
+      # Optionale GUI-Freigabe geänderter Audio-Adressen. Vorher die beiden
+      # Verzeichnisse für UID 1000 auf der NVMe anlegen und im Webdienst einbinden.
+      # - ./tracking/proof:/tracking-proof:ro
+      # - ./tracking/address-approvals:/tracking-alias:ro
       # Für native_source in config.json erforderlich; vorher die private Datei
       # mit Modus 0600 für UID 1000 anlegen und diesen Bind-Mount aktivieren.
       # Ohne native_source bleibt der bisherige GPodder-Aktionsmodus verfügbar.

@@ -6,6 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from admin_store import atomic
+from restore_schedule import DEFAULTS as RESTORE_DEFAULTS, publish_policy, validate as validate_restore
 from io_policy import DEFAULTS as IO_DEFAULTS, settings as io_settings
 
 
@@ -27,6 +28,9 @@ FIELDS = {
     'series_enabled': ('series_organizer', 'enabled', False, None, None),
     'series_interval_seconds': ('series_organizer', 'interval_seconds', 3600, 300, 604800),
 }
+for key, low, high in [('enabled',None,None), ('interval_days',1,90), ('hour',0,23),
+                       ('timezone',None,None), ('max_age_days',1,365), ('notify_failures',None,None)]:
+    FIELDS['restore_'+key] = ('restore_schedule', key, RESTORE_DEFAULTS[key], low, high)
 for key in ('ebook_discovery_interval_seconds', 'ebook_candidate_stable_seconds',
             'ebook_retry_initial_seconds', 'ebook_retry_max_seconds', 'ebook_verify_interval_seconds',
             'folder_validation_interval_seconds', 'integrity_window_utc'):
@@ -83,6 +87,10 @@ def validate(base, overrides):
     result = with_overrides(base, overrides)
     podcast_window(result, 0)
     try:
+        validate_restore(dict(RESTORE_DEFAULTS, **result.get('restore_schedule', {})))
+    except (ValueError, TypeError, ZoneInfoNotFoundError):
+        raise ScheduleError('Bitte Schalter, Intervall, Uhrzeit und IANA-Zeitzone der Wiederherstellungsprobe prüfen.') from None
+    try:
         io_settings(result)
     except ValueError as exc:
         raise ScheduleError('Die E-Book- und Ordnerintervalle prüfen. Die maximale Wiederholungsfrist muss mindestens der ersten Frist entsprechen.') from exc
@@ -114,6 +122,8 @@ class MaintenanceSchedule:
         if saved != stamp:
             atomic(self.path, stamp)
         self.publish_organizer()
+        if (self.root/'control').is_dir():
+            publish_policy(self.root/'control', self.public()['values'])
 
     def _record(self, revision, overrides):
         return {'revision': revision, 'overrides': overrides, 'interval_seconds':
@@ -121,7 +131,7 @@ class MaintenanceSchedule:
 
     def effective(self, config):
         result = dict(config)
-        for field in ('settle_seconds', 'podcast_maintenance', 'series_organizer'):
+        for field in ('settle_seconds', 'podcast_maintenance', 'series_organizer','restore_schedule'):
             if field in self.base:
                 result[field] = self.base[field]
         return with_overrides(result, self.overrides)
@@ -142,6 +152,8 @@ class MaintenanceSchedule:
             self.overrides = updated
             self.revision += 1
         self.publish_organizer()
+        if (self.root/'control').is_dir():
+            publish_policy(self.root/'control', self.public()['values'])
         return self.public()
 
     def publish_organizer(self):

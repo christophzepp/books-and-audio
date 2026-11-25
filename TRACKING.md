@@ -136,3 +136,19 @@ Unter **Floppy-Zustellungen** zeigt Books & Audio ausstehende Episoden mit Ursac
 Jeder erfolgreich beantwortete GPodder-Episodenabruf der regulären Floppy-Integration zählt einmal je Antwortcursor. Wiederholungen desselben Abrufs und das Öffnen der GUI erhöhen den Zähler nicht. Ein bestätigter Empfang ist am zugehörigen GPodder-Cursor erkennbar. Mit eingerichtetem Floppy-Export bleibt die Folge bis zum passenden Hörstand im Ziel sichtbar. Ein veralteter, mehrdeutiger oder unvollständiger Nachweis wird als ausstehend angezeigt.
 
 Mit einem aktiven ntfy-Profil lässt sich die Benachrichtigung auf dieser Seite einschalten. Ab der Aktivierung zählen zwei unterschiedliche Floppy-Abrufe, während die Zustellung offen ist. Der Worker fasst neue Fälle in einer Meldung zusammen. Für Meldungen zum Zielstand muss ein aktueller Floppy-Export auch den zweiten Abruf abdecken. Die Auswertung läuft bei geschlossener GUI weiter und liest die Relay-Datenbank und die Nachweisdatei auf der NVMe.
+
+### Geänderte Audio-Adresse freigeben
+
+Unter **Floppy-Zustellungen** kannst du die Audio-Adresse einer offenen Folge prüfen und den angezeigten Hörstand zur Übertragung freigeben. Die Vorschau vergleicht die Folgenkennung aus PinePods mit dem eindeutigen Eintrag im aktuellen RSS-Feed. Eine Freigabe gilt für genau dieses Hörereignis, Konto und Adresspaar. Der nächste reguläre Floppy-Abruf prüft die Zuordnung erneut und übernimmt den ursprünglichen Zeitpunkt.
+
+Aktiviere dafür die kommentierten Volumes in `compose.dockge.yaml` beim Webdienst und in `compose.tracking.yaml` beim Relay. Beide Container lesen denselben Nachweisordner unter `/tracking-proof:ro`. Der Webdienst schreibt die Freigaben unter `/tracking-alias:rw`, das Relay liest sie unter `/tracking-alias:ro`. Lege die beiden Hostverzeichnisse vor dem Start privat auf der NVMe an. In den Dockge-Vorlagen verwenden beide Container UID 1000. Das Verzeichnis `tracking/address-approvals` gehört in die Sicherung des Tracking-Stacks.
+
+Für PinePods mit PostgreSQL, dessen API die Folgenkennung auslässt, aktualisiert dieser Hostaufruf den Nachweis. Trage den tatsächlichen Relay- und Datenbank-Containernamen sowie Adresse und Benutzer aus der Relay-Konfiguration ein.
+
+```sh
+python3 tracking_guid_host.py --relay-container TRACKING_CONTAINER --db-container PINEPODS_DB \
+  --upstream https://pinepods.example --pine-user PINEPODS_BENUTZER \
+  --output /opt/stacks/books-audio-tracking/tracking/proof/pinepods-guids.json
+```
+
+Der Helfer liest im laufenden Relay unter dessen eigener UID nur die ausstehenden Zuordnungen. Er gleicht sie über eine schreibgeschützte PostgreSQL-Abfrage mit dem PinePods-Konto ab und speichert Kennungen und Prüfsummen. Ein bestehender Host-Zeitplan kann ihn beispielsweise alle 30 Minuten ausführen. Wenn der Hostbenutzer die Relay-Datenbank direkt lesen darf, kannst du alternativ `--relay-db /pfad/zu/relay.sqlite` verwenden. Der Nachweis gilt 24 Stunden.

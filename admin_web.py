@@ -373,6 +373,13 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             token, csrf = method(payload, self.client_address[0], cookies.get(CSRF_COOKIE))
             return self.respond(200, {"ok": True}, cookies=[self.set_cookie(COOKIE, token, http_only=True), self.set_cookie(CSRF_COOKIE, csrf, max_age=SESSION_SECONDS)])
         self.require_session(session)
+        if path in {"/api/podcast-delivery/alias/preview", "/api/podcast-delivery/alias/approve"}:
+            from admin_delivery import alias_review
+            try:
+                result = alias_review(self.server.store, payload, apply=path.endswith("/approve"))
+            except ValueError:
+                raise WebError(400, "Die Anfrage zur Audio-Adresse ist ungültig.") from None
+            return self.respond(200, result)
         if path == "/api/podcast-delivery/alerts":
             from delivery_monitor import configure
             try:

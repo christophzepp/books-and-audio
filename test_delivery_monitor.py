@@ -3,10 +3,11 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from cryptography.fernet import Fernet
 from admin_store import AdminStore
+from admin_delivery import alias_review
 from delivery_monitor import configure, reconcile, report, send_pending
 from floppy_evidence import scope
 from gpodder_relay import Relay
@@ -45,6 +46,23 @@ class OpenDeliveriesTests(unittest.TestCase):
 
     def page(self):
         return report(self.store, env=self.env, now=self.now)
+
+    def test_alias_request_uses_exact_monitored_event_and_active_profile(self):
+        self.block()
+        self.poll()
+        page=self.page()
+        row=page['rows'][0]
+        data=dict(scope=page['scope'],episode_id=row['episode_id'],event_id=row['event_id'])
+        with patch('tracking_alias.preview',return_value={'state':'waiting'}) as preview:
+            self.assertEqual(alias_review(self.store,data,apply=False,env=self.env)['state'],'waiting')
+            self.assertEqual(preview.call_args.args[1:],
+                ({'upstream':'https://pine.test','username':'reader','user_id':2},row['episode_id'],row['event_id']))
+        confirmed=dict(data,confirm=True,token='1'*64)
+        with patch('tracking_alias.approve',return_value={'state':'approved'}) as approve:
+            self.assertEqual(alias_review(self.store,confirmed,apply=True,env=self.env)['state'],'approved')
+            self.profiles[0]['id']='replacement-profile'
+            self.assertEqual(alias_review(self.store,confirmed,apply=True,env=self.env),{'state':'scope_mismatch'})
+            self.assertEqual(approve.call_count,1)
 
     def configure(self, enabled):
         page = self.page()

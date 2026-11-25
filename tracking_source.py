@@ -229,6 +229,9 @@ class NativeTrackingSource:
                                    'podcast': feed, 'episode': enclosure,
                                    'completed': row['Completed'], 'position': position,
                                    'total': duration, 'published_at': published}
+                    guid = row.get('Episodeguid') or row.get('episodeguid')
+                    if isinstance(guid, str) and 0 < len(guid) <= 8192 and all(ord(c) >= 32 for c in guid):
+                        snapshot['guid'] = guid
                     for field, label in (('title', row.get('Episodetitle')), ('show', show)):
                         if isinstance(label, str) and label.strip():
                             snapshot[field] = label.strip()[:512]

@@ -7,6 +7,43 @@ from urllib.parse import parse_qsl
 from tracking_delivery import read_episode_delivery, search_episode_delivery
 
 
+def alias_review(store, payload, *, apply, env=None):
+    from delivery_monitor import relay_scope_key
+    from tracking_delivery import _read
+    import tracking_alias
+
+    fields = {'episode_id', 'event_id', 'scope'}
+    if apply:
+        fields.update(('token', 'confirm'))
+    if set(payload) != fields:
+        raise ValueError('invalid_alias_request')
+    if (not isinstance(payload['episode_id'], str)
+            or not re.fullmatch(r'[1-9][0-9]{0,18}:[1-9][0-9]{0,18}:[1-9][0-9]{0,18}', payload['episode_id'])
+            or not all(isinstance(payload[k], str) and re.fullmatch('[0-9a-f]{64}', payload[k])
+                       for k in fields - {'episode_id', 'confirm'})
+            or (apply and payload['confirm'] is not True)):
+        raise ValueError('invalid_alias_request')
+    env = os.environ if env is None else env
+    view = store.list_connections()
+    context = relay_context(store, env, view=view)
+    if context is None:
+        return {'state': 'scope_mismatch'}
+    db, account = context
+    def check(relay):
+        current = relay_scope_key(relay, view, env.get('FLOPPY_EVIDENCE_USER', ''),
+                                  env.get('FLOPPY_EVIDENCE_RELAY_URL', ''))
+        return {'state': 'ok' if current == payload['scope'] else 'scope_mismatch'}
+    scoped = _read(db, account['upstream'], account['username'], account.get('user_id'), check)
+    if scoped['state'] != 'ok':
+        return scoped
+    args = db, account, payload['episode_id'], payload['event_id']
+    paths = dict(exchange_dir=Path(env.get('TRACKING_ALIAS_DIR', '/tracking-alias')),
+                 proof_file=Path(env.get('TRACKING_GUID_PROOF_FILE', '/tracking-proof/pinepods-guids.json')))
+    if apply:
+        return tracking_alias.approve(*args, payload['token'], **paths)
+    return tracking_alias.preview(*args, **paths)
+
+
 def parameters(query, *, search):
     if len(query) > 1536 or re.search(r'%(?![0-9a-fA-F]{2})', query):
         raise ValueError('invalid_query')

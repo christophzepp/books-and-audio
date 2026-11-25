@@ -1,3 +1,8 @@
+## 0.1.0-beta.20 – Geänderte Podcast-Adressen und regelmäßige Wiederherstellungsproben
+
+- Unter **Floppy-Zustellungen** lässt sich eine geänderte Audio-Adresse für eine einzelne, nachgewiesene Folge prüfen und freigeben. Die nächste inkrementelle gPodder-Abfrage kann den schon gespeicherten Hörstand zustellen.
+- Unter **Zeitpläne** lassen sich regelmäßige Wiederherstellungsproben einrichten. Die Probe liest eine abgeschlossene Sicherung von Hauptdienst und Trackingdienst in einer isolierten Umgebung. Fehler können über ntfy gemeldet werden.
+
 ## 0.1.0-beta.19 – Folgentitel bei offenen Zustellungen
 
 Die Liste offener Floppy-Zustellungen zeigt Titel und Podcastnamen aus dem aktuellen PinePods-Bestand. Fehlt dort eine Angabe, übernimmt die Anzeige den Wert aus dem ursprünglichen Hörereignis.

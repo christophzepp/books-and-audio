@@ -27,6 +27,24 @@ class Socket:
     def sendall(self,raw): self.output.extend(raw)
     def settimeout(self,value): pass
 class WebTests(unittest.TestCase):
+    def test_alias_endpoints_require_session_origin_csrf_and_explicit_approval(self):
+        url='/api/podcast-delivery/alias/'
+        row=dict(episode_id='2:13:32',event_id='1'*64,scope='2'*64)
+        self.request('GET','/api/session')
+        self.assertEqual(self.request('POST',url+'preview',row)[0],401)
+        self.bootstrap()
+        with patch('admin_delivery.alias_review',return_value={'state':'waiting'}) as review:
+            for action in ('preview','approve'):
+                self.assertEqual(self.request('POST',url+action,row,csrf=False)[0],403)
+                self.assertEqual(self.request('POST',url+action,row,origin=False)[0],403)
+                self.assertEqual(self.request('GET',url+action)[0],404)
+            review.assert_not_called()
+            self.assertEqual(self.request('POST',url+'preview',row)[0],200)
+            review.assert_called_once_with(self.store,row,apply=False)
+        for wrong in (dict(row,confirm=False,token='3'*64), dict(row,old='https://foreign',confirm=True,token='3'*64),
+                      dict(row,confirm=True,token=''),dict(row,confirm=True),dict(row,confirm=True,token=['3'*64])):
+            self.assertEqual(self.request('POST',url+'approve',wrong)[0],400)
+
     def test_open_delivery_dashboard_and_notification_setting_require_a_scoped_authenticated_request(self):
         endpoint='/api/podcast-delivery/open'
         settings='/api/podcast-delivery/alerts'

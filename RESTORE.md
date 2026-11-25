@@ -8,6 +8,46 @@ Verwende zwei abgeschlossene Sicherungen derselben Installation und desselben Pi
 
 Auch ein einzelnes TAR-Archiv des gestoppten Hauptstacks ist als `--main` zulässig. Bei benannten Dockge-Volumes müssen die obersten Archivverzeichnisse `config/`, `web_key/`, `state/`, `control/` und `web/` heißen. Die Probe vergleicht die beiden gesicherten Schlüsselkopien. Bei Bind-Mounts erwartet sie `config/`, `state/` sowie die Webanmeldung unter `web/web-auth/` oder `state/web-auth/`. Ein separates Archiv ohne Manifest erlaubt Struktur- und Entschlüsselungsprüfungen. Der Abgleich mit der bei der Sicherung aufgezeichneten SHA-256-Prüfsumme erfordert das Manifest.
 
+## Automatische Probe einrichten
+
+Der eigene Dienst `restore-check` liest die registrierten Sicherungen nur zum Prüftermin. Er hat kein Netzwerk, verwendet ein temporäres Dateisystem im Arbeitsspeicher und schreibt das Ergebnis in das Steuerverzeichnis auf der NVMe. Eine ausgefallene oder verspätete Probe wird auch durch den laufenden Hauptdienst erkannt.
+
+1. Lege einen privaten Katalog auf der NVMe für die UID des Dienstes an. Registriere ein abgeschlossenes Sicherungspaar wie unten beschrieben.
+2. Setze in Dockge `RESTORE_BACKUP_CATALOG` auf den absoluten Katalogpfad und aktiviere das Compose-Profil `restore`. Verwenden Hauptdienst und Relay verschiedene Adressen derselben PinePods-Instanz, setze `RESTORE_PRIMARY_ORIGIN` und `RESTORE_RELAY_ORIGIN` auf die bereits verifizierten Adressen. Der Checker braucht ausschließlich den Katalog lesend und `control/restore-check` als Ergebnisverzeichnis.
+3. Aktiviere in **Zeitpläne → Wiederherstellungsprobe** die automatische Prüfung. Die erste Probe startet innerhalb einer Minute. Weitere Termine folgen im gewählten Abstand zur festgelegten Ortszeit. Voreingestellt sind sieben Tage, 07:00 Uhr in Europa/Berlin und ein Sicherungshöchstalter von 30 Tagen.
+4. Aktiviere bei Bedarf **ntfy bei Fehlern** und prüfe das ntfy-Verbindungsprofil. Der Hauptdienst sendet bei einem fortbestehenden Fehler höchstens eine bestätigte Nachricht. Nach einer bestandenen Probe kann der nächste Fehler erneut gemeldet werden. Bestätigt ntfy die Ablehnung einer Nachricht, versucht der Dienst die Zustellung frühestens eine Stunde später erneut. Bei unklarem Ausgang einer Übertragung vermeidet er eine doppelte Benachrichtigung.
+
+Unter **Übersicht** stehen letzter Versuch, Zeitpunkt der Sicherung, nächster Termin und Prüfergebnis. Fehlt der Checker zwei Stunden nach Fälligkeit, zeigt die Übersicht einen überfälligen Termin. Die Ausfallerkennung und Benachrichtigung setzen einen laufenden Hauptdienst voraus.
+
+### Ein Sicherungspaar registrieren
+
+```sh
+install -d -m 0700 /pfad/auf/der/nvme/restore-backups
+python3 restore_pair.py --main /pfad/zur/sicherung/main \
+  --relay /pfad/zur/sicherung/relay --catalog /pfad/auf/der/nvme/restore-backups
+```
+
+Führe die Registrierung nach jeder neuen, fertigen Sicherung aus. Bei einer Deployment-Sicherung werden `revision` und `version` im Hauptmanifest mit `commit` und `version` in `relay/image.json` verglichen. Als Aufnahmezeit dienen die ursprünglichen Änderungszeiten der beiden Manifestdateien, sofern keine expliziten Aufnahmezeiten vorliegen. Der Zeitabstand zwischen den Teilaufnahmen darf höchstens 24 Stunden betragen.
+
+Bei einer gemeinsam erstellten nächtlichen Sicherung tragen beide Manifeste dieselbe `snapshot_id` und jeweils `captured_at` in Unix-Sekunden. Das Hauptmanifest enthält außerdem `schema: 1`, `archive_sha256` und das Objekt `protected` aus der Sicherung. Der Katalog speichert Prüfsummen für beide Teile und bewertet die Frische anhand des älteren Aufnahmezeitpunkts. Das erneute Registrieren eines alten Paars verlängert seine Frist nicht.
+
+Der Katalog wechselt erst nach vollständiger Kopie und Prüfsummenkontrolle auf das neue Paar. Danach entfernt er seine vorherige Arbeitskopie. Die eigentlichen Sicherungen verbleiben beim Sicherungsdienst. Ist das aktuelle Paar beschädigt, zu alt oder nicht vorhanden, wird die Probe mit diesem Grund als fehlgeschlagen angezeigt.
+
+### Das aktuelle Paar aus Kopia übernehmen
+
+Für eine vorhandene Kopia-Sicherung der Stackverzeichnisse stehen im Release die Hostprogramme `restore_kopia_host.py` und `restore_pair.py`. Lege beide nebeneinander auf der NVMe ab. Der Host-Benutzer braucht Zugriff auf den vorhandenen Kopia-Container und Schreibrecht auf den privaten Katalog. Die Prüf-GUI und der Wiederherstellungscontainer erhalten ausschließlich ihren jeweiligen Dateizugriff.
+
+```sh
+python3 /pfad/zu/restore_kopia_host.py \
+  --source 'BENUTZER@HOST:/pfad/im/kopia-container' \
+  --main-stack book-progress-sync --relay-stack books-audio-tracking \
+  --kopia-container kopia --catalog /pfad/auf/der/nvme/restore-backups
+```
+
+`--source` ist die exakte Kopia-Quelle, deren Wurzel die beiden angegebenen Stackverzeichnisse enthält. Hauptdienst und Relay müssen als Bind-Mount-Installation in der Sicherung vorliegen. Bei einer Installation mit Docker-Volumes kannst du stattdessen ein abgeschlossenes Volumen-Sicherungspaar mit `restore_pair.py` registrieren.
+
+Plane diesen Aufruf auf dem Host nach der regelmäßigen Kopia-Sicherung ein. Er wählt die neueste vollständig abgeschlossene Aufnahme der angegebenen Quelle. Er liest die benötigten Dateien beider Dienste einschließlich vorhandener SQLite-WAL-Dateien aus genau dieser Aufnahme und übernimmt sie gemeinsam in den NVMe-Katalog. `published` bezeichnet eine übernommene Aufnahme. `already_current` bedeutet, dass der Katalog bereits diesen oder einen neueren Stand enthält. Die eigentliche Wiederherstellungsprobe läuft zu dem in der GUI eingestellten Termin.
+
 ## Vom Docker-Host ausführen
 
 Setze die beiden Pfade auf die tatsächlichen Sicherungsordner des gewählten Zeitpunkts. Im Beispiel benötigt UID 1000 Lesezugriff auf beide Sicherungen. `--mount` meldet einen fehlenden Quellpfad als Fehler. Als temporären Arbeitsbereich verwendet der Container ein eigenes Dateisystem im Arbeitsspeicher. Dessen Größe muss für die ausgewählten Datenbanken und den SQLite-Arbeitsbereich ausreichen.
@@ -15,7 +55,7 @@ Setze die beiden Pfade auf die tatsächlichen Sicherungsordner des gewählten Ze
 ```sh
 MAIN=/pfad/zur/sicherung/main-20261125
 RELAY=/pfad/zur/sicherung/relay-20261125
-IMAGE=ghcr.io/christophzepp/books-and-audio:0.1.0-beta.18
+IMAGE=ghcr.io/christophzepp/books-and-audio:0.1.0-beta.20
 
 docker run --rm --read-only --network none --user 1000:1000 \
   --cap-drop ALL --security-opt no-new-privileges \

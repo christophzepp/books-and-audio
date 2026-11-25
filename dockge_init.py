@@ -39,6 +39,7 @@ def prepare(config_root, keys, state, cfg=None, credentials=None):
             if not db.is_file() or web_key.read_bytes() != (current / "secret.key").read_bytes():
                 raise ValueError("Die Datenvolumes passen nicht zur bestehenden Installation.")
             prepare_series_directories(state)
+            (state/'control/restore-check').mkdir(mode=0o700,exist_ok=True)
             return
         if not current.exists():
             if web_key.exists() or any(state.joinpath("control").iterdir()) or any(p.name != "control" for p in state.iterdir()):
@@ -55,6 +56,7 @@ def prepare(config_root, keys, state, cfg=None, credentials=None):
             connection.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('paused','true')")
         atomic(ready, {"version": 1})
         prepare_series_directories(state)
+        (state/'control/restore-check').mkdir(mode=0o700,exist_ok=True)
 
 
 if __name__ == "__main__":

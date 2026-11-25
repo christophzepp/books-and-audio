@@ -28,7 +28,7 @@ SIDE = r'(?:-wal|-journal)?'
 SCOPE_DB = r'state/bookorbit-scopes/[0-9a-f]{64}\.sqlite'
 MAIN_FILES = re.compile(
     r'(?:config/(?:current/)?(?:config\.json|credentials\.enc|secret\.key)|web_key/secret\.key|'
-    r'(?:state|web)/web-auth/credentials\.json|(?:state/)?control/(?:folders\.json|connections\.enc|admin\.sqlite' +
+    r'(?:state|web)/web-auth/credentials\.json|(?:state/)?control/(?:tracking-alias/[0-9a-f]{64}\.json|folders\.json|connections\.enc|admin\.sqlite' +
     SIDE + r')|(?:state/state\.sqlite|' + SCOPE_DB + ')' + SIDE + r')\Z')
 MAX_RESTORED = 8 * 1024**3
 
@@ -271,7 +271,31 @@ def delivery_history(root, native):
             digest.update(b'\0')
             for row in db.execute(query):
                 digest.update((encoded(row) + '\n').encode())
+        if native and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_address_approvals'").fetchone():
+            for event_id, token, approved_at, kind in db.execute(
+                    'SELECT a.event_id,a.token,a.approved_at,e.kind FROM native_address_approvals a '
+                    'LEFT JOIN native_tracking_events e ON e.event_id=a.event_id ORDER BY a.event_id'):
+                require(kind == 'play' and re.fullmatch('[a-f0-9]{64}',event_id) and
+                        re.fullmatch('[a-f0-9]{64}',token) and type(approved_at) is int and approved_at > 0)
+                digest.update(('alias:' + encoded([event_id,token,approved_at]) + '\n').encode())
     return digest.digest()
+
+
+def check_address_requests(state, relay):
+    requests = state/'control/tracking-alias'
+    if not requests.is_dir():
+        return
+    with closing(open_db(relay/'relay.sqlite')) as db:
+        has_receipts = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_address_approvals'").fetchone()
+        for file in requests.glob('*.json'):
+            require(file.stat().st_size <= 4096)
+            request = load(file)
+            require(type(request.get('version')) is int and request['version'] == 1 and
+                    request['event_id'] == file.stem and re.fullmatch('[a-f0-9]{64}',request['token']) and
+                    type(request.get('approved_at')) is int and request['approved_at'] > 0)
+            if has_receipts:
+                receipt = db.execute('SELECT token FROM native_address_approvals WHERE event_id=?', (file.stem,)).fetchone()
+                require(not receipt or receipt[0] == request['token'])
 
 
 def restart_relay(root, cfg):
@@ -306,6 +330,7 @@ def drill(main_backup, relay_backup, aliases=None):
             checks[step] = True
             step = 'relay_cursor'
             report['cursor'] = check_cursor(relay, tracking_cfg, report['counts'])
+            check_address_requests(root/'state',relay)
             restart_relay(relay, tracking_cfg)
             checks[step] = True
             step = 'account_match'

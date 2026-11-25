@@ -9,7 +9,7 @@ COUNTS = ('profiles', 'active_profiles', 'state_records', 'mapping_approvals', '
           'relay_episodes', 'relay_events', 'confirmed', 'pending_actions')
 
 
-def read_report(control):
+def _last_drill(control):
     flags = os.O_RDONLY | os.O_NOFOLLOW
     try:
         directory = os.open(control / 'restore-check', flags | os.O_DIRECTORY)
@@ -40,3 +40,20 @@ def read_report(control):
         return {'state': 'missing'}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
         return {'state': 'unreadable'}
+
+
+def read_report(control, *, now=None):
+    from restore_schedule import inspect_schedule
+    try:
+        schedule = inspect_schedule(control/'restore-check', now)
+    except (OSError, ValueError, TypeError, KeyError, OverflowError):
+        schedule = {'state':'failed','error':'backup_pair','next_at':None,'checked_at':None,'backup_at':None}
+    report = _last_drill(control)
+    if schedule is None:
+        return report
+    schedule.pop('incident', None)
+    if schedule['state'] == 'not_running' or (schedule['state'] == 'failed' and
+            (schedule['checked_at'] or 0) >= (report.get('checked_at') or 0)):
+        if schedule['error'] not in CHECKS or report.get('state') != 'failed':
+            report = {'state':'failed','checked_at':schedule['checked_at'],'error':schedule['error']}
+    return dict(report, schedule=schedule)

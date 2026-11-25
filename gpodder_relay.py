@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 import requests
 from tracking_delivery import ensure_delivery_schema, record_batch
 import tracking_outbox
+from tracking_alias import AddressReviewPoll, ensure_schema as ensure_address_schema
 
 LIMIT = 32 * 1024 * 1024
 
@@ -84,6 +85,7 @@ class Relay:
                 db.execute('CREATE TABLE IF NOT EXISTS native_tracking_superseded '
                            '(event_id TEXT PRIMARY KEY, successor TEXT NOT NULL)')
                 tracking_outbox.ensure_schema(db, pending, self.get(db, 'native_blocked'), self.get(db, 'last_poll'))
+                ensure_address_schema(db)
                 native = config['native_source']
                 if not isinstance(native, dict): raise ValueError('invalid_native_tracking_source')
                 native_scope = encoded([self.upstream, self.username, native.get('user_id'),
@@ -215,6 +217,7 @@ class Relay:
         self.set(db, 'native_inventory_scan', scan_number)
         db.commit()
         if hasattr(self.resolver, 'begin_poll'): self.resolver.begin_poll()
+        address_review = AddressReviewPoll(self.resolver, now)
         output, fingerprints, blocked = [], [], []
         cursor = max(now, ack + 1)
         current = {row['id']: row for row in snapshots}
@@ -252,6 +255,11 @@ class Relay:
                     # Resolver exceptions can include a private URL. Only persist
                     # the known reason codes from our RSS resolver.
                     reason = str(error) if str(error) in tracking_outbox.RSS_REASONS else 'resolver_unavailable'
+            db.execute('DELETE FROM native_address_candidates WHERE event_id=?', (ident,))
+            if reason == 'tracking_rss_identity_unresolved' and hasattr(self.resolver, 'cache'):
+                approved = address_review.consider(db, event, wire)
+                if approved is not None:
+                    item, reason = approved, None
             tracking_outbox.record_attempt(db, ident, cursor, now, reason)
             if reason:
                 blocked.append(ident)

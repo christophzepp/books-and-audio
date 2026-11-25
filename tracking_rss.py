@@ -12,6 +12,14 @@ import requests
 MAX_FEED = 16 * 1024 * 1024
 
 
+class FeedEntries(list):
+    """Retain identity collisions even when an item has no usable enclosure."""
+    def __init__(self):
+        super().__init__()
+        self.ambiguous_guids = set()
+        self.ambiguous_urls = set()
+
+
 def valid_url(value):
     try:
         p=urlsplit(value)
@@ -26,18 +34,27 @@ def parse_feed(body):
         raise ValueError('tracking_invalid_feed')
     try:root=ET.fromstring(body)
     except ET.ParseError:raise ValueError('tracking_invalid_feed') from None
-    entries=[]
+    entries=FeedEntries()
+    seen_guids,seen_urls=set(),set()
     for node in root.iter():
         if node.tag.rsplit('}',1)[-1] not in ('item','entry'):continue
-        guid=None;urls=[]
+        guids=set();urls=[]
         for child in node:
             tag=child.tag.rsplit('}',1)[-1]
             if tag in ('guid','id') and child.text:
-                guid=child.text.strip()
+                guids.add(child.text.strip())
             if tag=='enclosure':urls.append(child.attrib.get('url'))
             if tag=='link' and child.attrib.get('rel')=='enclosure':urls.append(child.attrib.get('href'))
         urls=list(dict.fromkeys(u for u in urls if valid_url(u)))
-        if len(urls)==1:
+        entries.ambiguous_guids.update(seen_guids & guids)
+        entries.ambiguous_urls.update(seen_urls.intersection(urls))
+        seen_guids.update(guids)
+        seen_urls.update(urls)
+        if len(guids)>1 or len(urls)>1:
+            entries.ambiguous_guids.update(guids)
+            entries.ambiguous_urls.update(urls)
+        if len(urls)==1 and len(guids)<=1:
+            guid=next(iter(guids),None)
             if guid is not None and (not guid or len(guid)>8192 or any(ord(c)<32 for c in guid)):
                 raise ValueError('tracking_invalid_feed_identity')
             entries.append({'episode':urls[0],'guid':guid})
@@ -92,8 +109,16 @@ class TrackingResolver:
             if action.get('guid'):guids.add(action['guid'])
             new_urls={a.get('new') for a in evidence if a.get('new')}
             matches=[x for x in entries if x['episode'] in new_urls or x.get('guid') in guids]
+            if (len(guids)>1 or len(new_urls)>1 or len(matches)==1
+                    and (guids and matches[0].get('guid') not in guids
+                         or new_urls and matches[0]['episode'] not in new_urls)):
+                raise ValueError('tracking_rss_identity_changed')
         if len(matches)!=1:raise ValueError('tracking_rss_identity_unresolved')
         match=matches[0];result=dict(action,episode=match['episode'])
+        if (match['episode'] in getattr(entries,'ambiguous_urls',())
+                or match.get('guid') in getattr(entries,'ambiguous_guids',())
+                or sum(x['episode']==match['episode'] for x in entries)!=1):
+            raise ValueError('tracking_rss_identity_ambiguous')
         if match.get('guid'):
             if sum(x.get('guid')==match['guid'] for x in entries)!=1:raise ValueError('tracking_rss_identity_ambiguous')
             result['guid']=match['guid'];result['url']=match['guid']

@@ -42,6 +42,34 @@ const review={review_id:'review',digest:'digest',states:[
 ]};
 const choose=(node)=>{node.checked=true;node.onchange();};
 
+test('changed-address approval binds the original event and rejects a stale preview or unconfirmed click',async()=>{
+  const h=fixture();
+  const scope='a'.repeat(64), token='b'.repeat(64);
+  const item={title:'Folge',show:'Reihe',episode_id:'2:17:11291',event_id:'c'.repeat(64),code:'tracking_rss_identity_unresolved'};
+  const page={state:'ok',scope,total:1,rows:[item],offset:0};
+  const load=h.ctx.loadOpenDeliveries();h.requests[0].resolve(page);await load;
+  const open=h.$('open-delivery-rows').children[0].children[2].onclick();
+  assert.equal(h.requests[1].path,'/api/podcast-delivery/alias/preview');
+  const identity={scope,episode_id:item.episode_id,event_id:item.event_id};
+  assert.deepEqual({...h.requests[1].body},identity);
+  const preview={state:'ready',token,old_host:'example.test',new_host:'example.test',old_digest:'d'.repeat(64),
+    new_digest:'e'.repeat(64),changed_query_keys:['v'],proof:'pinepods_guid',status:'completed'};
+  h.requests[1].resolve(preview);await open;
+  const panel=h.$('alias-evidence').content();
+  assert.match(panel,/Bisherige Audio-Adresse.*dddddddddddddddd.*Neue Audio-Adresse.*eeeeeeeeeeeeeeee/);
+  assert.match(panel,/PinePods-Bestand/);assert.match(panel,/Gehört/);
+  await h.$('alias-apply').onclick();assert.equal(h.requests.length,2);
+  choose(h.$('alias-confirm'));
+  const approve=h.$('alias-apply').onclick();
+  await h.$('alias-apply').onclick();assert.equal(h.requests.length,3);
+  assert.deepEqual({...h.requests[2].body},{...identity,token,confirm:true});
+  h.requests[2].resolve({state:'stale',waiting_reason:'source_changed'});await approve;
+  assert.equal(h.$('alias-apply').disabled,true);assert.match(h.$('alias-status').textContent,/geändert/);
+  const retry=h.$('alias-retry').onclick();h.$('alias-dialog').close();h.requests[3].resolve(preview);await retry;
+  assert.equal(h.$('alias-apply').disabled,true);
+  assert.equal(h.$('alias-evidence').children.length,0);
+});
+
 test('book detail requires selecting a supported reviewed source and sends its digest once',async()=>{
   const h=fixture();
   const preview=h.ctx.bookStartButton(ebook).onclick();

@@ -51,6 +51,13 @@ def notification_guard(view):
     return digest(fields) if all(fields) else None
 
 
+def relay_scope_key(relay, view, floppy_user, relay_url):
+    native = _state(relay, 'native_scope')
+    scan = _state(relay, 'native_scan') or {}
+    actual_user = json.loads(native)[2] or (scan.get('source') or {}).get('user_id')
+    return digest([profile(view, 'pinepods').get('id'), native, actual_user, floppy_user, relay_url])
+
+
 def preference(db):
     row = db.execute('SELECT value FROM settings WHERE key=?', (SETTING,)).fetchone()
     return json.loads(row[0]) if row else {}
@@ -169,10 +176,7 @@ def reconcile(store, env=None, now=None):
     with _LOCK, store.db() as db:
         pref = preference(db)
         def read(relay):
-            native = _state(relay, 'native_scope')
-            scan = _state(relay, 'native_scan') or {}
-            actual_user = json.loads(native)[2] or (scan.get('source') or {}).get('user_id')
-            scope_key = digest([profile(view, 'pinepods').get('id'), native, actual_user, target['floppy_user'], target['relay_url']])
+            scope_key = relay_scope_key(relay, view, target['floppy_user'], target['relay_url'])
             active = bool(guard and pref.get('guard') == guard and pref.get('scope') == scope_key)
             cases, last_poll = collect(relay, db, account, target, scope_key, pref if active else {}, now)
             return dict(state='ok', scope=scope_key, cases=cases, poll_id=last_poll,
@@ -212,10 +216,10 @@ def report(store, offset=0, **args):
         db.execute('BEGIN')
         key = status['scope']
         total = db.execute('SELECT COUNT(*) FROM floppy_cases WHERE scope=?', (key,)).fetchone()[0]
-        rows = db.execute('SELECT report FROM floppy_cases WHERE scope=? '
+        rows = db.execute('SELECT event_id, report FROM floppy_cases WHERE scope=? '
                           "ORDER BY eligible DESC,COALESCE(json_extract(report,'$.last_attempt_at'),0) DESC,event_id LIMIT ? OFFSET ?",
                           (key, PAGE, offset))
-        return dict(status, rows=[json.loads(row[0]) for row in rows], total=total, offset=offset,
+        return dict(status, rows=[dict(json.loads(row[1]), event_id=row[0]) for row in rows], total=total, offset=offset,
                     has_more=offset+PAGE < total)
 
 

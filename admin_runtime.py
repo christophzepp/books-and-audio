@@ -194,7 +194,7 @@ class Administration:
         # Existing installations keep their active interval in the encrypted
         # connection store. New schedule sections may first appear in config.json.
         schedule_cfg = dict(saved_cfg)
-        for field in ('settle_seconds', 'podcast_maintenance', 'series_organizer'):
+        for field in ('settle_seconds', 'podcast_maintenance', 'series_organizer', 'restore_schedule'):
             if field in self.base_config:
                 schedule_cfg[field] = self.base_config[field]
         if self.folders:
@@ -1054,6 +1054,11 @@ def _admin_loop(args, root, config, credentials, bridge_type, journal, activity)
                 try:
                     send_pending(admin, cfg, creds)
                 except (OSError, ValueError, sqlite3.Error):
+                    pass
+                from restore_scheduler import notify_failure
+                try:
+                    notify_failure(admin.store, cfg, creds)
+                except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
                     pass
             disabled = disabled or participant_block(root, cfg)
             if disabled == 'required_connection_disabled':

@@ -38,7 +38,9 @@ services:
       - control:/admin-state/control
       # Optional bei installiertem Tracking-Stack. Den tatsächlichen NVMe-Pfad verwenden.
       # - /opt/stacks/books-audio-tracking/tracking/state:/tracking-readonly:ro
-      # - ./floppy-proof:/tracking-proof:ro
+      # Für Adressfreigaben in beiden Stacks dieselben beiden Hostpfade eintragen.
+      # - /opt/stacks/books-audio-tracking/tracking/proof:/tracking-proof:ro
+      # - /opt/stacks/books-audio-tracking/tracking/address-approvals:/tracking-alias:rw
     healthcheck:
       test: [CMD, python, admin_web.py, --health]
       interval: 15s
@@ -63,6 +65,30 @@ services:
       interval: 20s
       timeout: 5s
       retries: 5
+
+  restore-check:
+    <<: *service
+    profiles: [restore]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    network_mode: none
+    command: [python, restore_scheduler.py, --loop]
+    tmpfs: [/tmp:rw,nosuid,nodev,mode=1777,size=1g]
+    environment:
+      RESTORE_PRIMARY_ORIGIN: "${RESTORE_PRIMARY_ORIGIN:-}"
+      RESTORE_RELAY_ORIGIN: "${RESTORE_RELAY_ORIGIN:-}"
+    volumes:
+      - type: bind
+        source: ${RESTORE_BACKUP_CATALOG:-./restore-backups}
+        target: /backups
+        read_only: true
+        bind: {create_host_path: false}
+      - type: volume
+        source: control
+        target: /result
+        volume: {subpath: restore-check, nocopy: true}
 
   series-organizer:
     <<: *service
