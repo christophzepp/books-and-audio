@@ -14,7 +14,7 @@
 </section>
 <div id="app-screen" class="app-shell" hidden>
   <aside class="sidebar"><a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true">↔</span><span>Books &amp; Audio<span class="brand-sub">Sync-Verwaltung</span></span></a>
-  <nav aria-label="Hauptnavigation"><button class="nav-item active" data-page="overview"><span aria-hidden="true">◫</span>Übersicht</button><button class="nav-item" data-page="books"><span aria-hidden="true">▤</span>Bücher</button><button class="nav-item" data-page="audiobooks"><span aria-hidden="true">♫</span>Hörbücher</button><button class="nav-item" data-page="podcasts"><span aria-hidden="true">◉</span>Podcasts</button><button class="nav-item" data-page="connections"><span aria-hidden="true">⇄</span>Verbindungen</button><button class="nav-item" data-page="folders"><span aria-hidden="true">▣</span>Medienordner</button><button class="nav-item" data-page="reviews"><span aria-hidden="true">✓</span>Freigaben<span id="review-count" class="nav-count" hidden></span></button><button class="nav-item" data-page="events"><span aria-hidden="true">≡</span>Protokoll</button></nav>
+  <nav aria-label="Hauptnavigation"><button class="nav-item active" data-page="overview"><span aria-hidden="true">◫</span>Übersicht</button><button class="nav-item" data-page="books"><span aria-hidden="true">▤</span>Bücher</button><button class="nav-item" data-page="audiobooks"><span aria-hidden="true">♫</span>Hörbücher</button><button class="nav-item" data-page="podcasts"><span aria-hidden="true">◉</span>Podcasts</button><button class="nav-item" data-page="connections"><span aria-hidden="true">⇄</span>Verbindungen</button><button class="nav-item" data-page="folders"><span aria-hidden="true">▣</span>Medienordner</button><button class="nav-item" data-page="reviews"><span aria-hidden="true">✓</span>Freigaben<span id="review-count" class="nav-count" hidden></span></button><button class="nav-item" data-page="schedule"><span aria-hidden="true">◷</span>Zeitpläne</button><button class="nav-item" data-page="events"><span aria-hidden="true">≡</span>Protokoll</button></nav>
   <div class="sidebar-bottom"><span class="privacy-dot"></span> Nur in deinem privaten Netz<button id="logout-button" class="quiet">Abmelden</button></div></aside>
   <main class="main"><header class="page-header"><div><p class="eyebrow">BIBLIOTHEKEN VERBINDEN</p><h1 id="page-title">Alles im Blick</h1><p id="page-description" class="muted">Hörpositionen und Lesestände, zuverlässig verbunden.</p></div><button id="refresh-button" class="secondary">Aktualisieren</button></header>
   <div id="global-message" class="notice" role="status" hidden></div>
@@ -43,6 +43,25 @@
   <section id="page-connections" class="page" hidden>
     <section class="panel"><div class="panel-head"><div><h2>Deine Dienste</h2><p class="muted">Eingerichtete Profile und ihr aktueller Status.</p></div><button id="add-connection" class="primary">Verbindung hinzufügen</button></div>
       <div id="service-list" class="service-grid"></div></section>
+    <section id="bo-scope" class="panel" hidden>
+      <div class="panel-head"><div><h2>BookOrbit-Konto und Bibliotheken</h2><p id="bo-scope-active" class="muted"></p></div></div>
+      <form id="bo-scope-form">
+        <label>Gespeichertes BookOrbit-Profil<select id="bo-scope-profile" required></select></label>
+        <div class="podcast-fields">
+          <label>Hörbuch-Bibliotheken (IDs)<input id="bo-scope-audio" type="text" maxlength="512" autocomplete="off" spellcheck="false" aria-describedby="bo-scope-ids-help"></label>
+          <label>E-Book-Bibliothek (ID, optional)<input id="bo-scope-ebook" type="number" min="1" step="1"></label>
+        </div>
+        <p id="bo-scope-ids-help" class="help">Verwende die Bibliotheks-IDs aus BookOrbit. Trenne mehrere Hörbuch-IDs mit Kommas. Ein leeres E-Book-Feld nimmt die E-Book-Bibliothek aus dem Abgleich.</p>
+        <button id="bo-scope-preview" class="secondary" type="submit">Konto und Bibliotheken prüfen</button>
+      </form>
+      <div id="bo-scope-review" hidden>
+        <div class="podcast-fields"><div><h3>Bisheriger Abgleich</h3><div id="bo-scope-previous"></div></div><div><h3>Neuer Abgleich</h3><div id="bo-scope-proposed"></div></div></div>
+        <p class="help">Der neue Buchabgleich führt eigene Freigaben und beginnt mit den aktuellen Ständen der beteiligten Dienste. Abweichende Anfangsstände brauchen eine Prüfung. Der Podcast-Abgleich läuft weiter.</p>
+        <label class="checkbox-label"><input id="bo-scope-confirm" type="checkbox"><span>Ich habe das Zielkonto und die Bibliothekspfade geprüft und möchte auf diese Auswahl wechseln.</span></label>
+        <button id="bo-scope-approve" type="button" class="primary" disabled>Geprüfte Auswahl übernehmen</button>
+      </div>
+      <p id="bo-scope-message" class="help" role="status" aria-live="polite"></p>
+    </section>
     <section class="panel provider-panel"><div class="panel-head"><div><p class="eyebrow">MEDIENZUORDNUNG</p><h2>Welcher Dienst verbindet Hörbuch und E-Book?</h2><p id="provider-current" class="muted"></p></div></div><p>Wähle BookOrbit oder BookBridge, um die zusammengehörigen Ausgaben zu finden. Prüfe die Auswahl und aktiviere sie anschließend.</p><label class="compact-label">Zuordnungsdienst<select id="provider-choice"><option value="bookorbit">BookOrbit</option><option value="bookbridge">BookBridge · ohne BookOrbit</option></select></label><p id="provider-help" class="help"></p><div class="card-actions"><button id="provider-preview" class="secondary">Modus prüfen</button><button id="provider-activate" class="primary">Diesen Modus aktivieren</button></div><div id="provider-result" class="notice" hidden></div></section><div class="panel-head"><div><h2>Verbindungsprofile verwalten</h2><p class="muted">Je Dienst kann ein Profil aktiv sein.</p></div></div><div id="connection-list" class="connection-list"></div></section>
   <section id="page-folders" class="page" hidden><div class="section-actions"><p class="muted">Ordnerpfade der Apps zusammenführen. Je Medienart ist ein Ordnerprofil aktiv. Dateien werden weder verschoben noch gelöscht.</p><button id="add-folder" class="primary">Ordnerprofil hinzufügen</button></div><div id="folder-roots" class="info-line"></div><div id="folder-list" class="connection-list"></div></section>
   <section id="page-podcasts" class="page" hidden>
@@ -73,6 +92,49 @@
     <section class="panel"><div class="panel-head"><div><h2>Podcastfolgen</h2><p class="muted">Laufzeiten vergleichen und bei abweichenden Hörständen die Quelle wählen.</p></div></div>
       <div id="review-podcasts" class="issue-list"></div></section>
   </div></section>
+  <section id="page-schedule" class="page" hidden>
+    <form id="schedule-form">
+      <section class="panel"><h2>Fortschrittsabgleich</h2>
+        <div class="schedule-fields">
+          <label>Abstand zwischen zwei Läufen (Sekunden)<input type="number" data-schedule="interval_seconds" min="1" max="86400" required></label>
+          <label>Wartezeit bei neuen Hör- oder Leseständen (Sekunden)<input type="number" data-schedule="settle_seconds" min="0" max="86400" required></label>
+        </div>
+      </section>
+      <section class="panel"><h2>Podcast-Dateiprüfungen</h2>
+        <p class="muted">Offene Dateiprüfungen werden auf dem Zustandsvolume vorgemerkt und im gewählten Fenster ausgeführt. Bereits zugeordnete Folgen gleichen ihren Hörstand weiter im normalen Takt ab.</p>
+        <div class="schedule-fields">
+          <label>Beginn (volle Stunde)<input type="number" data-schedule="podcast_start_hour" min="0" max="23" required></label>
+          <label>Ende (volle Stunde)<input type="number" data-schedule="podcast_end_hour" min="0" max="23" required></label>
+          <label>Zeitzone<input type="text" data-schedule="podcast_timezone" placeholder="Europe/Berlin" maxlength="100" required></label>
+        </div>
+        <p id="schedule-podcast-status" class="help"></p>
+      </section>
+      <section class="panel"><h2>Hörspielserien</h2>
+        <label class="checkbox-label"><input type="checkbox" data-schedule="series_enabled"><span>Neu importierte Hörspielfolgen unter ihrer Serie einsortieren</span></label>
+        <div class="schedule-fields">
+          <label>Neue Importe prüfen alle (Sekunden)<input type="number" data-schedule="series_interval_seconds" min="300" max="604800" required></label>
+        </div>
+        <p id="schedule-series-status" class="help"></p>
+      </section>
+      <section class="panel"><details class="podcast-settings"><summary>Weitere Prüfintervalle für Bücher und Medienordner</summary>
+        <div class="schedule-fields">
+          <label>Hörbuch-Zuordnungen suchen (Sekunden)<input type="number" data-schedule="book_discovery_seconds" min="60" max="86400" required></label>
+          <label>Hörbuch vor Zuordnung beobachten (Sekunden)<input type="number" data-schedule="book_stable_seconds" min="300" max="86400" required></label>
+          <label>Mitlese-Ausgabe beobachten (Sekunden)<input type="number" data-schedule="readalong_stable_seconds" min="30" max="86400" required></label>
+          <label>E-Books im Katalog suchen (Sekunden)<input type="number" data-schedule="ebook_discovery_interval_seconds" min="60" max="86400" required></label>
+          <label>Neue EPUB vor Prüfung beobachten (Sekunden)<input type="number" data-schedule="ebook_candidate_stable_seconds" min="60" max="86400" required></label>
+          <label>Erster erneuter EPUB-Versuch (Sekunden)<input type="number" data-schedule="ebook_retry_initial_seconds" min="30" max="86400" required></label>
+          <label>Maximale Wartezeit vor erneutem EPUB-Versuch (Sekunden)<input type="number" data-schedule="ebook_retry_max_seconds" min="30" max="604800" required></label>
+          <label>Zusätzliche EPUB-Inhaltsprüfung (Sekunden, 0 für aus)<input type="number" data-schedule="ebook_verify_interval_seconds" min="0" max="31536000" required></label>
+          <label>Zusätzliche Ordnerprüfung (Sekunden, 0 für aus)<input type="number" data-schedule="folder_validation_interval_seconds" min="0" max="86400" required></label>
+          <label>EPUB-Prüffenster ab (UTC-Stunde, optional)<input id="integrity-start" type="number" min="0" max="23"></label>
+          <label>EPUB-Prüffenster bis (UTC-Stunde, optional)<input id="integrity-end" type="number" min="0" max="23"></label>
+        </div>
+      </details></section>
+      <div class="card-actions"><button id="schedule-save" class="primary" type="submit" disabled>Zeitplan speichern</button><button id="schedule-reset" class="secondary" type="button" disabled>Änderungen verwerfen</button></div>
+      <p id="schedule-message" class="notice" role="status" hidden></p>
+    </form>
+  </section>
   <section id="page-events" class="page" hidden><section class="panel"><div class="panel-head"><div><h2>Aktivitäten</h2><p class="muted">Abgleiche, Verbindungsprüfungen und Freigaben.</p></div><div class="list-tools"><label class="compact-label">Ansicht<select id="event-filter"><option value="all">Alle Ereignisse</option><option value="attention">Hinweise und Fehler</option></select></label><button id="clear-events" class="secondary danger" disabled>Protokoll leeren</button></div></div><div id="event-list" class="event-list"></div></section></section>
   <footer id="last-refreshed">Noch nicht aktualisiert</footer></main>
 </div>

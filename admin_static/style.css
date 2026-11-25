@@ -24,6 +24,9 @@
 .issue-copy p { font-size: 13px; margin: 4px 0 0; }
 .issue-row button { flex: none; font-size: 12px; }
 .clear-status { color: var(--green); margin: 0; font-size: 13px; }
+.schedule-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,15rem),1fr)); gap: 12px 18px; margin: 15px 0; }
+.schedule-fields label { margin: 0; }
+.schedule-fields input { display: block; width: 100%; }
 #additional-book-reviews { margin-top: 18px; }
 #additional-book-reviews summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 13px; }
 .provider-panel { background: #f1f4ff; border-color: #cad5f7; border-left: 4px solid var(--accent); }
@@ -35,3 +38,5 @@
   .metric>span { min-height: 0; }
   .attention-panel .panel-head { flex-wrap: wrap; }
 }
+
+#bo-scope-review{margin-top:18px;border-top:1px solid var(--line);padding-top:18px}#bo-scope-review ul{padding-left:20px}#bo-scope-review .scope-root{margin:2px 0 6px;overflow-wrap:anywhere}#bo-scope-message:empty{display:none}
