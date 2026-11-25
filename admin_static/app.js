@@ -30,7 +30,7 @@ async function api(path,body){
   if(!response.ok){if(response.status===401&&!['/api/login','/api/setup'].includes(path)){state.authenticated=false;showAuth();}const error=new Error(data.error||'Die Anfrage konnte nicht ausgeführt werden.');error.status=response.status;throw error;}
   return data;
 }
-function showAuth(){resetActivity();state.missingReview=null;resetBookScope();document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());$('connection-form').reset();state.review=null;state.episodeReview=null;state.editing=null;state.podcastDirty=false;state.scheduleDirty=false;state.scheduleBase=null;$('schedule-form').reset();$('schedule-message').hidden=true;$('podcast-form').reset();state.status={};state.connections={revision:0,profiles:[],schemas:{}};state.events=[];['service-list','connection-list','review-books','review-book-options','review-podcasts','attention-books','attention-podcasts','podcast-rows','event-list','recent-events','review-files','connection-fields','book-rows','book-empty','ebook-import-list'].forEach(id=>clear($(id)));$('app-screen').hidden=true;$('auth-screen').hidden=false;$('setup-token-row').hidden=state.initialized;$('confirmation-row').hidden=state.initialized;text('auth-title',state.initialized?'Willkommen zurück':'Dein privater Sync-Zugang');text('auth-description',state.initialized?'Melde dich an, um Verbindungen und Freigaben zu verwalten.':'Lege einen eigenen Zugang für diese Verwaltung an. Der einmalige Einrichtungscode stammt aus der Server-Einrichtung.');text('auth-submit',state.initialized?'Anmelden':'Zugang anlegen');$('auth-password').autocomplete=state.initialized?'current-password':'new-password';$('auth-password').minLength=state.initialized?1:12;}
+function showAuth(){resetBookStart();resetDelivery();resetActivity();state.missingReview=null;resetBookScope();document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());$('connection-form').reset();state.review=null;state.episodeReview=null;state.editing=null;state.podcastDirty=false;state.scheduleDirty=false;state.scheduleBase=null;$('schedule-form').reset();$('schedule-message').hidden=true;$('podcast-form').reset();state.status={};state.connections={revision:0,profiles:[],schemas:{}};state.events=[];['service-list','connection-list','review-books','review-book-options','review-podcasts','attention-books','attention-podcasts','podcast-rows','event-list','recent-events','review-files','connection-fields','book-rows','book-empty','ebook-import-list'].forEach(id=>clear($(id)));$('app-screen').hidden=true;$('auth-screen').hidden=false;$('setup-token-row').hidden=state.initialized;$('confirmation-row').hidden=state.initialized;text('auth-title',state.initialized?'Willkommen zurück':'Dein privater Sync-Zugang');text('auth-description',state.initialized?'Melde dich an, um Verbindungen und Freigaben zu verwalten.':'Lege einen eigenen Zugang für diese Verwaltung an. Der einmalige Einrichtungscode stammt aus der Server-Einrichtung.');text('auth-submit',state.initialized?'Anmelden':'Zugang anlegen');$('auth-password').autocomplete=state.initialized?'current-password':'new-password';$('auth-password').minLength=state.initialized?1:12;}
 async function session(){const result=await api('/api/session');state.initialized=result.initialized;state.authenticated=result.authenticated;if(!state.authenticated){showAuth();return false;}$('auth-screen').hidden=true;$('app-screen').hidden=false;return true;}
 $('auth-form').addEventListener('submit',async event=>{event.preventDefault();text('auth-error','');$('auth-submit').disabled=true;try{const body={username:$('auth-username').value,password:$('auth-password').value};if(!state.initialized){body.token=$('setup-token').value.trim();body.confirmation=$('auth-confirmation').value;}await api(state.initialized?'/api/login':'/api/setup',body);$('auth-form').reset();await session();await refresh();if(state.page==='activity')await loadActivity();}catch(error){text('auth-error',error.message);}finally{$('auth-submit').disabled=false;}});
 $('logout-button').addEventListener('click',async()=>{try{await api('/api/logout',{});state.authenticated=false;state.status={};state.connections={revision:0,profiles:[],schemas:{}};state.events=[];state.review=null;state.editing=null;await session();}catch(error){toast(error.message,true);}});
@@ -74,8 +74,99 @@ function renderOverview(){const status=state.status,summary=status.summary||{};c
   renderIssueList('attention-podcasts', podcastIssues(), 'podcasts');
 }
 function bookPosition(book){if(['finished','completed'].includes(book.progress_status))return 'Abgeschlossen';if(book.type==='ebook'){if(Number.isFinite(book.position_percent))return book.position_percent.toLocaleString('de-DE',{maximumFractionDigits:1})+' %';if(Number.isFinite(book.progress_fraction))return (book.progress_fraction*100).toLocaleString('de-DE',{maximumFractionDigits:1})+' %';return book.position?'Leseposition gespeichert':'Noch kein Fortschritt';}const value=typeof book.position==='number'?book.position:book.position?.seconds;if(!Number.isFinite(value))return 'Noch kein Fortschritt';const seconds=Math.max(0,Math.floor(value));return Math.floor(seconds/3600)+':'+String(Math.floor(seconds%3600/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');}
-function renderLibrary(prefix,ebook){clear($(prefix+'-rows'));clear($(prefix+'-empty'));const all=(state.status.books||[]).filter(book=>(book.type==='ebook')===ebook);const query=$(prefix+'-search').value.trim().toLocaleLowerCase('de');const issues=$(prefix+'-filter').value==='issues';const books=all.filter(book=>(!issues||hasIssue(book))&&(book.title||'').toLocaleLowerCase('de').includes(query));text(prefix+'-count',books.length+' von '+all.length+' Titeln · Stand der letzten Rückmeldung');$(prefix+'-empty').hidden=Boolean(books.length);if(!books.length){empty($(prefix+'-empty'),issues?'Keine passenden Fehler oder Sperren':query?'Kein passender Titel':'Noch keine Titel erfasst',issues?'Ändere die Ansicht, um alle Titel zu sehen.':query?'Versuche einen anderen Suchbegriff.':'Die Übersicht wird nach dem nächsten Lauf aktualisiert.');return;}const labels={ok:'Bereit',blocked:'Gesperrt',waiting:'Wartet',paused:'Pausiert',pending_review:'Prüfung nötig'};for(const book of books){const row=element('tr');const title=element('td','book-title');title.append(element('strong','',book.title||'Unbenannter Titel'));if(book.reason)title.append(element('small','muted',describe(book.reason)));const kind=element('td','',book.type==='ebook'?'E-Book':'Hörbuch');const status=element('td');status.append(badge(labels[book.status]||'Nicht bestätigt',book.status==='ok'?'good':book.status==='blocked'?'bad':'warning'));const position=element('td','book-position',bookPosition(book));const action=element('td','book-action');const id=book.abs_id;const reviewable=book.can_review!==false&&Boolean(id)&&(book.has_readalong===true||book.status==='blocked');if(reviewable)action.append(button('Dateiprüfung','secondary',()=>previewReview(id)));row.append(title,kind,status,position,action);$(prefix+'-rows').append(row);}}
+function renderLibrary(prefix,ebook){clear($(prefix+'-rows'));clear($(prefix+'-empty'));const all=(state.status.books||[]).filter(book=>(book.type==='ebook')===ebook);const query=$(prefix+'-search').value.trim().toLocaleLowerCase('de');const issues=$(prefix+'-filter').value==='issues';const books=all.filter(book=>(!issues||hasIssue(book))&&(book.title||'').toLocaleLowerCase('de').includes(query));text(prefix+'-count',books.length+' von '+all.length+' Titeln · Stand der letzten Rückmeldung');$(prefix+'-empty').hidden=Boolean(books.length);if(!books.length){empty($(prefix+'-empty'),issues?'Keine passenden Fehler oder Sperren':query?'Kein passender Titel':'Noch keine Titel erfasst',issues?'Ändere die Ansicht, um alle Titel zu sehen.':query?'Versuche einen anderen Suchbegriff.':'Die Übersicht wird nach dem nächsten Lauf aktualisiert.');return;}const labels={ok:'Bereit',blocked:'Gesperrt',waiting:'Wartet',paused:'Pausiert',pending_review:'Prüfung nötig'};for(const book of books){const row=element('tr');const title=element('td','book-title');title.append(element('strong','',book.title||'Unbenannter Titel'));if(book.reason)title.append(element('small','muted',describe(book.reason)));const kind=element('td','',book.type==='ebook'?'E-Book':'Hörbuch');const status=element('td');status.append(badge(labels[book.status]||'Nicht bestätigt',book.status==='ok'?'good':book.status==='blocked'?'bad':'warning'));const position=element('td','book-position',bookPosition(book));const action=element('td','book-action');const id=book.abs_id;const reviewable=book.can_review!==false&&Boolean(id)&&(book.has_readalong===true||book.status==='blocked');if(book.initial_review)action.append(bookStartButton(book));if(reviewable)action.append(button('Dateiprüfung','secondary',()=>previewReview(id)));row.append(title,kind,status,position,action);$(prefix+'-rows').append(row);}}
 function renderBooks(){renderLibrary('book',true);renderLibrary('audio',false);renderEbookImports();}
+let bookStart = null;
+const bookSourceNames = {abs:'Audiobookshelf', bo:'BookOrbit', jf:'Jellyfin'};
+function resetBookStart() {
+  bookStart=null;
+  clear($('book-start-states'));
+  $('book-start-choices').hidden=true;
+  $('book-start-choices').disabled=false;
+  $('book-start-apply').disabled=true;
+  $('book-start-retry').hidden=true;
+  text('book-start-title','Anfangsstand auswählen');
+  text('book-start-impact','');
+  text('book-start-message','');
+}
+function bookStartButton(book) {
+  return button('Anfangsstand auswählen','secondary',()=>previewBookStart(book));
+}
+function startingPosition(row) {
+  const statuses={not_started:'Nicht begonnen',in_progress:'Angefangen',finished:'Abgeschlossen'};
+  const label=statuses[row.status] || 'Stand unbekannt';
+  if (!Number.isFinite(row.position)) return label;
+  const position=row.unit==='seconds' ? bookPosition({position:row.position})
+    : row.unit==='percent' ? row.position.toLocaleString('de-DE',{maximumFractionDigits:2})+' %' : '';
+  return position ? label+' · '+position : label;
+}
+async function previewBookStart(book) {
+  if (state.busy || !state.authenticated || !book.id) return;
+  const dialog=$('book-start-dialog');
+  resetBookStart();
+  const view={book};
+  bookStart=view;
+  text('book-start-title',book.title || 'Anfangsstand auswählen');
+  text('book-start-message','Die aktuellen Stände der beteiligten Dienste werden gelesen …');
+  if (!dialog.open) dialog.showModal();
+  try {
+    const review=await runCommand('bookstart.preview',{id:book.id,media:book.type});
+    if (bookStart!==view || !dialog.open || !state.authenticated) return;
+    view.review=review;
+    const choices=review.states.filter(row=>row.selectable);
+    for (const row of review.states) {
+      const label=element('label','checkbox-label');
+      const input=element('input');
+      input.type='radio';
+      input.name='book-start-source';
+      input.value=row.source;
+      input.disabled=!row.selectable;
+      const summary=(bookSourceNames[row.source]||row.source)+' · '+startingPosition(row);
+      const copy=element('span','',summary);
+      if (!row.selectable) copy.append(element('small','help',row.status==='not_started'
+        ? 'Ein Zurücksetzen auf null ist bei dieser Erstfreigabe nicht verfügbar.' : 'Dieser Stand kann nicht übernommen werden.'));
+      input.addEventListener('change',()=>{
+        if (bookStart!==view || !input.checked || !row.selectable) return;
+        view.source=row.source;
+        const targets=review.states.filter(peer=>peer.source!==row.source).map(peer=>bookSourceNames[peer.source]||peer.source);
+        text('book-start-impact','Übernehmen in '+targets.join(' und ')+'.');
+        $('book-start-apply').disabled=false;
+      });
+      label.append(input,copy);
+      $('book-start-states').append(label);
+    }
+    $('book-start-choices').hidden=false;
+    text('book-start-message',choices.length ? 'Die Dienste melden unterschiedliche Anfangsstände.' : 'Aktuell ist kein Anfangsstand zur Übernahme verfügbar.');
+    $('book-start-retry').hidden=choices.length>0;
+  } catch(error) {
+    if (bookStart!==view || !dialog.open) return;
+    text('book-start-message',error.message);
+    $('book-start-retry').hidden=false;
+  }
+}
+$('book-start-dialog').addEventListener('close',resetBookStart);
+$('book-start-retry').addEventListener('click',()=>{if (bookStart) return previewBookStart(bookStart.book);});
+$('book-start-apply').addEventListener('click',async()=>{
+  const view=bookStart;
+  if (!view?.source || !view.review || state.busy || !state.authenticated || view.applying) return;
+  const source=view.source;
+  view.applying=true;
+  $('book-start-apply').disabled=true;
+  $('book-start-choices').disabled=true;
+  try {
+    const result=await runCommand('bookstart.apply',{review_id:view.review.review_id,digest:view.review.digest,source,confirm:true});
+    if (bookStart!==view || !$('book-start-dialog').open) return;
+    if (!result.applied) throw new Error('Der Dienst hat die Übernahme nicht bestätigt. Prüfe die aktuellen Stände erneut.');
+    $('book-start-dialog').close();
+    toast('Anfangsstand für „'+view.book.title+'“ übernommen.');
+  } catch(error) {
+    if (bookStart!==view) return;
+    view.review=null;
+    text('book-start-message',error.message);
+    text('book-start-impact','Prüfe die aktuellen Stände vor einer erneuten Auswahl.');
+    $('book-start-retry').hidden=false;
+  }
+});
 async function previewMissing(media) {
   if (state.busy) return;
   const dialog=$('missing-dialog');
@@ -286,7 +377,9 @@ function renderIssueList(targetId, rows, page){
     const reason = item.pine_status_reason || item.pine_reason || item.reason;
     if (reason) copy.append(element('p', 'muted', describe(reason)));
     row.append(copy);
-    if (podcast && item.id && (item.can_review||item.can_edit_status)) {
+    if (!podcast && item.initial_review) {
+      row.append(bookStartButton(item));
+    } else if (podcast && item.id && (item.can_review||item.can_edit_status)) {
       row.append(episodeReviewButton(item));
     } else if (!podcast && item.type !== 'ebook' && item.abs_id && item.can_review !== false) {
       row.append(button('Dateistand prüfen', 'secondary', () => previewReview(item.abs_id)));
@@ -384,7 +477,7 @@ $('activity-more').addEventListener('click',()=>loadActivity(true));
 function eventSeverity(event){const value=[event.level,event.status,event.event,event.kind].filter(Boolean).join(' ').toLowerCase();return /error|failed|fail|fehler/.test(value)?'bad':/warn|block|pending|review/.test(value)?'warning':/success|synced|complete|approved/.test(value)?'good':'';}
 function renderEvents(target,items){clear(target);if(!items.length){empty(target,'Noch keine Ereignisse','Neue Aktivitäten erscheinen hier automatisch.');return;}for(const item of items){const row=element('article','event');const title=item.title||item.message||eventNames[item.event]||eventNames[item.kind]||'Synchronisation aktualisiert';const copy=element('div');copy.append(element('strong','',title));const detail=item.reason||item.error||item.description||item.detail;if(detail)copy.append(element('p','',describe(detail)));row.append(element('span','event-dot '+eventSeverity(item)),copy,element('time','',formatDate(item.at||item.created_at||item.timestamp)));target.append(row);}}
 function render(){renderBookScope();renderSchedule();renderOverview();renderBooks();renderServices();renderConnections();renderFolders();renderProvider();renderPodcasts();renderReviews();let events=state.events;if($('event-filter').value==='attention')events=events.filter(item=>['bad','warning'].includes(eventSeverity(item)));renderEvents($('event-list'),events);$('clear-events').disabled=state.busy||!state.events.length;$('add-connection').disabled=state.busy;}
-function mergeEvents(response){const commands=Array.isArray(response.commands)?response.commands:[];const ids=new Set(commands.map(item=>item.id));const events=(Array.isArray(response)?response:response.events||[]).filter(item=>!ids.has(item.detail?.command_id));const actions={'library.preview_missing':'Fehlende Titel geprüft','library.retire_missing':'Buchzuordnungen entfernt','bookorbit.preview_scope':'BookOrbit-Konto und Bibliotheken geprüft','bookorbit.approve_scope':'BookOrbit-Abgleich gewechselt','schedule.update':'Zeitplan aktualisiert','ebook.retry':'E-Book-Import erneut geprüft','connection.create':'Verbindung angelegt','connection.update':'Verbindung bearbeitet','connection.delete':'Verbindung entfernt','connection.test':'Verbindung geprüft','connection.activate':'Verbindung aktiviert','connection.deactivate':'Verbindung deaktiviert','review.preview':'Dateistand geprüft','review.approve':'Dateistand freigegeben','folder.create':'Ordnerprofil angelegt','folder.update':'Ordnerprofil bearbeitet','folder.test':'Ordner geprüft','folder.activate':'Ordnerprofil aktiviert','folder.deactivate':'Ordnerprofil deaktiviert','folder.delete':'Ordnerprofil entfernt','provider.preview':'Zuordnungsmodus geprüft','provider.activate':'Zuordnungsmodus aktiviert','podcast.preview':'Podcast-Abgleich geprüft','podcast.configure':'Podcast-Einstellungen übernommen','episode.status_preview':'Hörstände der Folge geprüft','episode.status_apply':'Hörstatus freigegeben','episode.preview':'Podcastfolge geprüft','episode.approve':'Statusabgleich freigegeben','sync.pause':'Synchronisation pausiert','sync.resume':'Synchronisation fortgesetzt'};const statuses={queued:'wartet',running:'läuft',success:'abgeschlossen',failed:'fehlgeschlagen'};for(const command of commands)events.push({at:command.updated_at||command.created_at,status:command.status,kind:command.kind,title:(actions[command.kind]||'Verwaltungsauftrag')+' · '+(statuses[command.status]||command.status),error:command.error,description:command.result?.message});return events.sort((a,b)=>epoch(b.at||b.created_at||b.timestamp)-epoch(a.at||a.created_at||a.timestamp));}
+function mergeEvents(response){const commands=Array.isArray(response.commands)?response.commands:[];const ids=new Set(commands.map(item=>item.id));const events=(Array.isArray(response)?response:response.events||[]).filter(item=>!ids.has(item.detail?.command_id));const actions={'bookstart.preview':'Anfangsstände geprüft','bookstart.apply':'Anfangsstand übernommen','library.preview_missing':'Fehlende Titel geprüft','library.retire_missing':'Buchzuordnungen entfernt','bookorbit.preview_scope':'BookOrbit-Konto und Bibliotheken geprüft','bookorbit.approve_scope':'BookOrbit-Abgleich gewechselt','schedule.update':'Zeitplan aktualisiert','ebook.retry':'E-Book-Import erneut geprüft','connection.create':'Verbindung angelegt','connection.update':'Verbindung bearbeitet','connection.delete':'Verbindung entfernt','connection.test':'Verbindung geprüft','connection.activate':'Verbindung aktiviert','connection.deactivate':'Verbindung deaktiviert','review.preview':'Dateistand geprüft','review.approve':'Dateistand freigegeben','folder.create':'Ordnerprofil angelegt','folder.update':'Ordnerprofil bearbeitet','folder.test':'Ordner geprüft','folder.activate':'Ordnerprofil aktiviert','folder.deactivate':'Ordnerprofil deaktiviert','folder.delete':'Ordnerprofil entfernt','provider.preview':'Zuordnungsmodus geprüft','provider.activate':'Zuordnungsmodus aktiviert','podcast.preview':'Podcast-Abgleich geprüft','podcast.configure':'Podcast-Einstellungen übernommen','episode.status_preview':'Hörstände der Folge geprüft','episode.status_apply':'Hörstatus freigegeben','episode.preview':'Podcastfolge geprüft','episode.approve':'Statusabgleich freigegeben','sync.pause':'Synchronisation pausiert','sync.resume':'Synchronisation fortgesetzt'};const statuses={queued:'wartet',running:'läuft',success:'abgeschlossen',failed:'fehlgeschlagen'};for(const command of commands)events.push({at:command.updated_at||command.created_at,status:command.status,kind:command.kind,title:(actions[command.kind]||'Verwaltungsauftrag')+' · '+(statuses[command.status]||command.status),error:command.error,description:command.result?.message});return events.sort((a,b)=>epoch(b.at||b.created_at||b.timestamp)-epoch(a.at||a.created_at||a.timestamp));}
 async function refresh(){if(!state.authenticated||state.refreshing)return;state.refreshing=true;$('refresh-button').disabled=true;try{const [status,connections,events,folders]=await Promise.all([api('/api/status'),api('/api/connections'),api('/api/events'),api('/api/folders')]);state.status=status;state.connections=connections;state.folders=folders;state.events=mergeEvents(events);render();text('last-refreshed','Aktualisiert: '+formatDate(new Date().toISOString()));if(!state.busy)notice('');}catch(error){notice(error.message,true);}finally{state.refreshing=false;$('refresh-button').disabled=false;}}
 $('refresh-button').addEventListener('click',()=>{refresh();if(state.page==='activity')loadActivity();});$('event-filter').addEventListener('change',render);$('book-search').addEventListener('input',renderBooks);
 function confirmation(title,description,accept='Bestätigen'){return new Promise(resolve=>{text('confirm-title',title);text('confirm-description',description);text('confirm-accept',accept);const dialog=$('confirm-dialog');const done=value=>{dialog.close();$('confirm-accept').onclick=null;$('confirm-cancel').onclick=null;dialog.oncancel=null;resolve(value);};$('confirm-accept').onclick=()=>done(true);$('confirm-cancel').onclick=()=>done(false);dialog.oncancel=event=>{event.preventDefault();done(false);};dialog.showModal();});}
@@ -599,11 +692,138 @@ function renderPodcastEpisodes(){
     if(episode.status==='waiting'&&!episode.pine_status_reason&&episode.pine_status==='enrolled')status.append(element('small','muted','Der Abgleich wartet auf einen stabilen Hörstand oder das Ende einer Wiedergabe.'));const position=element('td','book-position',bookPosition(episode));
     if(episode.pine_mode==='status_only')position.append(element('small','muted','Hörposition in Audiobookshelf / Jellyfin'));
     const action=element('td','book-action');
+    if(episode.id)action.append(button('Floppy-Zustellung','secondary',()=>openDelivery('episode_id',episode.id,episode)));
     if(episode.can_review||episode.can_edit_status)action.append(episodeReviewButton(episode));
     if(episode.can_retry_conflict)action.append(conflictRetry('podcast',episode.id));
     row.append(title,services,status,position,action);$('podcast-rows').append(row);
   }
 }
+
+let deliverySearch=null, deliverySelection=null;
+const deliveryIssues={
+  unavailable:'Die Zustellhistorie des GPodder-Relays ist derzeit nicht verfügbar.',
+  not_found:'Für diese Folge wurde kein eindeutiger Eintrag gefunden. Du kannst die Folge im PinePods-Bestand suchen.',
+  legacy:'Das Relay führt für diese Konfiguration keine native PinePods-Zustellhistorie.',
+  ambiguous:'Mehrere PinePods-Folgen kommen infrage. Wähle die konkrete Folge über die Suche im PinePods-Bestand.',
+  scope_mismatch:'Die Zustellhistorie passt nicht zur aktuellen PinePods-Verbindung.'
+};
+function resetDeliveryDetail() {
+  deliverySelection=null;
+  text('delivery-episode','');
+  text('delivery-status','');
+  clear($('delivery-stages'));
+}
+function resetDelivery() {
+  resetDeliveryDetail();
+  deliverySearch=null;
+  $('delivery-search-panel').open=false;
+  $('delivery-query').value='';
+  text('delivery-search-status','Hier findest du auch Folgen ohne lokalen Download.');
+  clear($('delivery-results'));
+  $('delivery-more').hidden=true;
+}
+async function findDeliveries(append=false) {
+  if (!state.authenticated) return;
+  const query=$('delivery-query').value.trim();
+  const previous=deliverySearch;
+  if (append && (!previous || previous.query!==query || !previous.hasMore || previous.loading)) return;
+  const offset=append ? previous.next : 0;
+  const search={query,next:offset,loading:true,hasMore:false};
+  deliverySearch=search;
+  $('delivery-more').hidden=true;
+  if (!append) clear($('delivery-results'));
+  text('delivery-search-status','Die Zustellhistorie wird durchsucht …');
+  try {
+    const page=await api('/api/podcast-delivery/search?q='+encodeURIComponent(query)+'&offset='+offset);
+    if (deliverySearch!==search || !state.authenticated) return;
+    if (page.state!=='ok') throw new Error(deliveryIssues[page.state]||'Der Suchstatus ist unbekannt.');
+    for (const episode of page.rows) {
+      const row=element('article','issue-row');
+      const copy=element('div','issue-copy');
+      copy.append(element('strong','',episode.title || 'PinePods-Folge '+episode.episode_id));
+      const metadata=[episode.show,episode.published_at && formatDate(episode.published_at)].filter(Boolean);
+      copy.append(element('p','muted',metadata.concat(episode.episode_id).join(' · ')));
+      row.append(copy,button('Zustellung ansehen','secondary',()=>openDelivery('native_id',episode.episode_id,episode)));
+      $('delivery-results').append(row);
+    }
+    search.next=offset+page.rows.length;
+    search.hasMore=page.has_more && page.rows.length>0;
+    text('delivery-search-status',search.next ? search.next+' Folgen angezeigt.' : 'Keine passende Folge in der Zustellhistorie gefunden.');
+  } catch(error) {
+    if (deliverySearch!==search || !state.authenticated) return;
+    text('delivery-search-status',error.message);
+    search.hasMore=append;
+  } finally {
+    if (deliverySearch===search) {
+      search.loading=false;
+      $('delivery-more').hidden=!search.hasMore;
+    }
+  }
+}
+$('delivery-search-form').addEventListener('submit',event=>{event.preventDefault();return findDeliveries();});
+$('delivery-query').addEventListener('input',()=>{
+  deliverySearch=null;
+  clear($('delivery-results'));
+  $('delivery-more').hidden=true;
+  text('delivery-search-status','Mit „Suchen“ den PinePods-Bestand durchsuchen.');
+});
+$('delivery-more').addEventListener('click',()=>findDeliveries(true));
+const deliveryEventDescriptions={
+  baseline:'Die Folge wurde als Ausgangsstand erfasst. Dieser Stand löst keinen nachträglichen Import aus.',
+  no_event:'Für den aktuellen Stand liegt kein neues Hörereignis vor.',
+  ready:'Das Hörereignis wartet auf die Bereitstellung im GPodder-Abruf.',
+  blocked:'Das Relay hält das Hörereignis zurück. Es wartet auf eine verifizierte Zuordnung oder einen passenden Quellenstand.',
+  offered:'Das Relay hat das Hörereignis in einem GPodder-Abruf bereitgestellt. Die Empfangsbestätigung steht aus.',
+  acknowledged:'Der GPodder-Client hat den Abruf mit dem zugehörigen Cursor bestätigt.'
+};
+function describeDelivery(data) {
+  const stages=$('delivery-stages');
+  const {source,event,target}=data;
+  const stage=(label,details)=>stages.append(element('dt','',label),element('dd','',details));
+  const status=source.completed ? 'Abgeschlossen' : source.position>0 ? 'Angefangen' : 'Nicht begonnen';
+  const length=Number.isFinite(source.total) && source.total>0 ? ' von '+durationLabel(source.total) : '';
+  const position=Number.isFinite(source.position) ? ' · '+durationLabel(source.position)+length : '';
+  stage('PinePods',status+position);
+  if (source.observed_at) stage('Zuletzt erfasst',formatDate(source.observed_at));
+  if (source.present_in_last_scan===false) stage('Aktueller Bestand','Diese Folge fehlte bei der letzten PinePods-Abfrage.');
+  if (source.updated_at) stage('Hörstand gemeldet',formatDate(source.updated_at));
+  stage('GPodder',deliveryEventDescriptions[event.stage] || 'Status unbekannt.');
+  if (event.ready_at) stage('Ereignis erzeugt',formatDate(event.ready_at));
+  if (event.offered_at) stage('Bereitgestellt',formatDate(event.offered_at));
+  if (event.acknowledged_at) stage('Abruf bestätigt',formatDate(event.acknowledged_at));
+  if (target?.state==='verified') {
+    const label=target.completed ? 'Abgeschlossen' : 'Angefangen';
+    stage('Floppy',label+' · '+durationLabel(target.position)+' · Hörstand in der Floppy-Bibliothek bestätigt.');
+    stage('Zielstand geprüft',formatDate(target.observed_at));
+    if (target.synced_at) stage('Floppy-Abgleich',formatDate(target.synced_at));
+  } else {
+    stage('Floppy','Für den Eintrag in der Floppy-Bibliothek liegt keine Bestätigung vor.');
+  }
+}
+async function openDelivery(key,id,episode) {
+  if (!state.authenticated) return;
+  const dialog=$('delivery-dialog');
+  resetDeliveryDetail();
+  const selection={key,id,episode};
+  deliverySelection=selection;
+  text('delivery-episode',[episode.show,episode.title || id].filter(Boolean).join(' · '));
+  text('delivery-status','Zustellhistorie wird geladen …');
+  if (!dialog.open) dialog.showModal();
+  try {
+    const data=await api('/api/podcast-delivery?'+key+'='+encodeURIComponent(id));
+    if (deliverySelection!==selection || !state.authenticated || !dialog.open) return;
+    if (data.state!=='ok') throw new Error(deliveryIssues[data.state]||'Die Zustellhistorie konnte nicht gelesen werden.');
+    describeDelivery(data);
+    text('delivery-status','');
+  } catch(error) {
+    if (deliverySelection===selection && state.authenticated) text('delivery-status',error.message);
+  }
+}
+$('delivery-dialog').addEventListener('close',resetDeliveryDetail);
+$('delivery-refresh').addEventListener('click',()=>{
+  const selection=deliverySelection;
+  if (selection) return openDelivery(selection.key,selection.id,selection.episode);
+});
 
 const episodePeerNames={abs:'Audiobookshelf',jf:'Jellyfin',pinepods:'PinePods',gpodder:'GPodder'};
 const episodeStatusNames={not_started:'Ungehört',in_progress:'Angefangen',finished:'Abgeschlossen'};

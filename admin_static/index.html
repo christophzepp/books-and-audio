@@ -82,6 +82,18 @@
         <div class="card-actions"><button id="podcast-preview" type="button" class="secondary">Podcast-Abgleich prüfen</button><button id="podcast-save" type="submit" class="primary">Einstellungen übernehmen</button></div><p id="podcast-result" class="notice" role="status" hidden></p>
       </form></details>
     </section>
+    <section class="panel">
+      <details class="podcast-settings" id="delivery-search-panel">
+        <summary>Floppy-Zustellung für eine PinePods-Folge prüfen</summary>
+        <form id="delivery-search-form" class="list-tools">
+          <label class="search-label">Folge im PinePods-Bestand suchen<input id="delivery-query" type="search" maxlength="120" placeholder="Titel, Podcast oder PinePods-ID" autocomplete="off"></label>
+          <button type="submit" class="secondary">Suchen</button>
+        </form>
+        <p id="delivery-search-status" class="muted" role="status">Hier findest du auch Folgen ohne lokalen Download.</p>
+        <div id="delivery-results" class="issue-list"></div>
+        <button type="button" id="delivery-more" class="secondary" hidden>Weitere Folgen laden</button>
+      </details>
+    </section>
     <section class="panel"><div class="panel-head book-heading"><div><h2>Deine Podcastfolgen</h2><p id="podcast-count" class="muted">Stand der letzten Rückmeldung.</p></div><div class="list-tools"><label class="search-label"><span class="sr-only">Podcastfolgen durchsuchen</span><input id="podcast-search" type="search" placeholder="Podcast oder Folge suchen …" autocomplete="off"></label><label class="compact-label">Ansicht<select id="podcast-filter"><option value="all">Alle anzeigen</option><option value="issues">Nur Fehler und Sperren</option><option value="waiting">Wartende Folgen</option><option value="position">Position + Status</option><option value="status_only">Nur Status · andere Fassung</option></select></label></div></div><div class="table-scroll"><table class="book-table"><thead><tr><th scope="col">Podcast / Folge</th><th scope="col">Teilnehmer</th><th scope="col">Status</th><th scope="col">Hörfortschritt</th><th scope="col"><span class="sr-only">Aktion</span></th></tr></thead><tbody id="podcast-rows"></tbody></table></div><div id="podcast-empty"></div></section>
   </section>
   <section id="page-reviews" class="page" hidden><div id="review-list">
@@ -149,12 +161,25 @@
 <dialog id="connection-dialog"><form id="connection-form"><div class="dialog-head"><div><p class="eyebrow">DIENST VERBINDEN</p><h2 id="connection-title">Neue Verbindung</h2></div><button type="button" class="icon-button" data-close="connection-dialog" aria-label="Schließen">×</button></div><label>Dienst<select id="connection-kind"></select></label><label>Name<input id="connection-name" required maxlength="100" placeholder="Zum Beispiel: Meine Hörbücher"></label><div id="connection-fields"></div><p class="help">Neue Verbindungen werden zunächst inaktiv gespeichert. Prüfe die Anmeldung, bevor du sie aktivierst.</p><p id="connection-error" class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary" data-close="connection-dialog">Abbrechen</button><button id="connection-save" class="primary" type="submit">Speichern</button></div></form></dialog>
 <dialog id="folder-dialog"><form id="folder-form"><div class="dialog-head"><h2 id="folder-title">Ordnerprofil</h2><button type="button" class="icon-button" data-close="folder-dialog" aria-label="Schließen">×</button></div><label>Medienart<select id="folder-kind"><option value="audiobooks">Hörbücher</option><option value="ebooks">E-Books</option><option value="podcasts">Podcasts</option></select></label><label>Name<input id="folder-name" required maxlength="120"></label><div id="folder-fields"></div><p class="help">Den Serverpfad leitet der Dienst aus der Docker-Freigabe ab. Nicht verwendete Apps können leer bleiben. Neue Profile sind zunächst inaktiv.</p><p id="folder-error" class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary" data-close="folder-dialog">Abbrechen</button><button id="folder-save" class="primary" type="submit">Speichern</button></div></form></dialog>
 <dialog id="review-dialog" class="wide-dialog"><div class="dialog-head"><div><p class="eyebrow">KONKRETEN DATEISTAND PRÜFEN</p><h2 id="review-title">Freigabe vorbereiten</h2></div><button class="icon-button" data-close="review-dialog" aria-label="Schließen">×</button></div><p id="review-reason" class="muted"></p><div id="review-blockers" class="notice error" hidden></div><div id="review-differences" class="notice"></div><div id="review-files" class="review-files"></div><p id="review-digest" class="digest"></p><p id="review-expiry" class="help"></p><label class="checkbox-label"><input id="review-confirm" type="checkbox"><span>Ich habe die angezeigten Dateien geprüft und gebe genau diesen Stand frei.</span></label><p id="review-error" class="form-error" role="alert"></p><div class="dialog-actions"><button class="secondary" data-close="review-dialog">Schließen</button><button id="review-approve" class="primary" disabled>Diesen Stand freigeben</button></div></dialog>
+<dialog id="delivery-dialog" class="wide-dialog" aria-labelledby="delivery-title">
+  <div class="dialog-head"><h2 id="delivery-title">Zustellung an Floppy</h2><button type="button" class="icon-button" data-close="delivery-dialog" aria-label="Schließen">×</button></div>
+  <p id="delivery-episode" class="muted"></p><p id="delivery-status" role="status"></p>
+  <dl id="delivery-stages" class="delivery-stages"></dl>
+  <div class="dialog-actions"><button type="button" class="secondary" data-close="delivery-dialog">Schließen</button><button type="button" class="secondary" id="delivery-refresh">Erneut abrufen</button></div>
+</dialog>
 <dialog id="episode-dialog" class="wide-dialog" aria-labelledby="episode-title"><div class="dialog-head"><div><p class="eyebrow">PODCASTFOLGE PRÜFEN</p><h2 id="episode-title">Folge prüfen</h2></div><button class="icon-button" data-close="episode-dialog" aria-label="Schließen">×</button></div>
 <p id="episode-durations"></p><p class="muted" id="episode-mode"></p><dl class="episode-states" id="episode-states"></dl>
 <label id="episode-source-label">Welcher Hörstatus soll übernommen werden?<select id="episode-source"></select></label>
 <p id="episode-detail-help" class="help">Audiobookshelf und Jellyfin teilen die lokale Hörposition. PinePods übernimmt nur den Hörstatus. Ein Abschluss gilt am Ende der jeweiligen Fassung.</p>
 <p id="episode-error" class="form-error" role="alert"></p>
 <div class="dialog-actions"><button class="secondary" data-close="episode-dialog">Abbrechen</button><button id="episode-approve" class="primary" disabled>Statusabgleich freigeben</button></div></dialog>
+<dialog id="book-start-dialog" class="wide-dialog" aria-labelledby="book-start-title">
+  <div class="dialog-head"><h2 id="book-start-title">Anfangsstand auswählen</h2><button class="icon-button" data-close="book-start-dialog" aria-label="Schließen">×</button></div>
+  <p id="book-start-message" role="status"></p>
+  <fieldset id="book-start-choices" class="start-choices" hidden><legend>Welcher Stand soll für diesen Titel gelten?</legend><div id="book-start-states"></div></fieldset>
+  <p id="book-start-impact" class="help" aria-live="polite"></p>
+  <div class="dialog-actions"><button class="secondary" data-close="book-start-dialog">Schließen</button><button id="book-start-retry" class="secondary" hidden>Erneut prüfen</button><button id="book-start-apply" class="primary" disabled>Anfangsstand übernehmen</button></div>
+</dialog>
 <dialog id="missing-dialog" class="wide-dialog" aria-labelledby="missing-heading">
   <div class="dialog-head"><h2 id="missing-heading">Fehlende Titel prüfen</h2><button class="icon-button" data-close="missing-dialog" aria-label="Schließen">×</button></div>
   <p id="missing-scope" class="muted"></p><p id="missing-status" role="status"></p><div id="missing-rows" class="issue-list"></div>

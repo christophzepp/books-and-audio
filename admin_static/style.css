@@ -40,3 +40,17 @@
 }
 
 #bo-scope-review{margin-top:18px;border-top:1px solid var(--line);padding-top:18px}#bo-scope-review ul{padding-left:20px}#bo-scope-review .scope-root{margin:2px 0 6px;overflow-wrap:anywhere}#bo-scope-message:empty{display:none}
+
+#delivery-search-form { margin-top:1rem; }
+#delivery-results:empty, .delivery-stages:empty { display:none; }
+.delivery-stages { display:grid; grid-template-columns:minmax(8rem,max-content) 1fr; gap:.65rem 1rem; }
+.delivery-stages dd { margin:0; }
+.delivery-stages dt { color:var(--muted); }
+.start-choices { border:0; padding:0; margin:1rem 0; }
+.start-choices legend { padding:0; font-weight:600; }
+.start-choices small { display:block; }
+.book-action button + button { margin:.25rem 0 .25rem .25rem; }
+@media(max-width:520px) {
+  .delivery-stages { grid-template-columns:1fr; gap:.25rem; }
+  .delivery-stages dd { margin-bottom:.5rem; }
+}
