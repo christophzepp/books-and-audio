@@ -146,6 +146,18 @@
           <label>EPUB-Prüffenster bis (UTC-Stunde, optional)<input id="integrity-end" type="number" min="0" max="23"></label>
         </div>
       </details></section>
+      <section class="panel" aria-labelledby="restore-plan-title">
+        <h2 id="restore-plan-title">Wiederherstellungsprobe</h2>
+        <label class="checkbox-label"><input type="checkbox" data-schedule="restore_enabled"><span>Sicherungen von Hauptdienst und gPodder-Relay regelmäßig prüfen</span></label>
+        <div class="schedule-fields">
+          <label>Wiederholen alle (Tage)<input type="number" data-schedule="restore_interval_days" min="1" max="90" required></label>
+          <label>Beginn (volle Stunde)<input type="number" data-schedule="restore_hour" min="0" max="23" required></label>
+          <label>Zeitzone<input type="text" data-schedule="restore_timezone" maxlength="100" required></label>
+          <label>Höchstalter der Sicherung (Tage)<input type="number" data-schedule="restore_max_age_days" min="1" max="365" required></label>
+        </div>
+        <label class="checkbox-label"><input type="checkbox" data-schedule="restore_notify_failures"><span>Bei einer fehlgeschlagenen oder überfälligen Probe über ntfy benachrichtigen</span></label>
+        <p id="schedule-restore-status" class="help" role="status"></p>
+      </section>
       <div class="card-actions"><button id="schedule-save" class="primary" type="submit" disabled>Zeitplan speichern</button><button id="schedule-reset" class="secondary" type="button" disabled>Änderungen verwerfen</button></div>
       <p id="schedule-message" class="notice" role="status" hidden></p>
     </form>
@@ -179,6 +191,13 @@
   <p id="delivery-episode" class="muted"></p><p id="delivery-status" role="status"></p>
   <dl id="delivery-stages" class="delivery-stages"></dl>
   <div class="dialog-actions"><button type="button" class="secondary" data-close="delivery-dialog">Schließen</button><button type="button" class="secondary" id="delivery-refresh">Erneut abrufen</button></div>
+</dialog>
+<dialog id="alias-dialog" class="wide-dialog" aria-labelledby="alias-heading">
+  <div class="dialog-head"><h2 id="alias-heading">Geänderte Audio-Adresse prüfen</h2><button class="icon-button" type="button" data-close="alias-dialog" aria-label="Schließen">×</button></div>
+  <p id="alias-episode" class="muted"></p><p id="alias-status" role="status"></p>
+  <dl id="alias-evidence" class="delivery-stages"></dl>
+  <label id="alias-confirm-label" class="checkbox-label" hidden><input type="checkbox" id="alias-confirm"><span>Ich gebe die geprüfte Adresse für die Zustellung dieses Hörstands an Floppy frei.</span></label>
+  <div class="dialog-actions"><button type="button" class="secondary" data-close="alias-dialog">Schließen</button><button type="button" class="secondary" id="alias-retry" hidden>Erneut prüfen</button><button type="button" class="primary" id="alias-apply" disabled>Audio-Adresse freigeben</button></div>
 </dialog>
 <dialog id="episode-dialog" class="wide-dialog" aria-labelledby="episode-title"><div class="dialog-head"><div><p class="eyebrow">PODCASTFOLGE PRÜFEN</p><h2 id="episode-title">Folge prüfen</h2></div><button class="icon-button" data-close="episode-dialog" aria-label="Schließen">×</button></div>
 <p id="episode-durations"></p><p class="muted" id="episode-mode"></p><dl class="episode-states" id="episode-states"></dl>

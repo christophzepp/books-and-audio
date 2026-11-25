@@ -75,21 +75,25 @@ function renderOverview(){const status=state.status,summary=status.summary||{};c
   renderRestoreCheck(status.restore_drill);
 }
 function renderRestoreCheck(report) {
-  const failure = {main_backup:'Sicherung des Hauptdienstes',accounts:'Konten und Schlüssel',
-    approvals_progress:'Freigaben und Fortschritte',relay_backup:'Sicherung des gPodder-Relays',
-    relay_cursor:'Abrufstand und offene Übertragungen',account_match:'Kontozuordnung zwischen Hauptdienst und Relay'};
   let label = 'Noch keine Probe protokolliert.';
-  let detail = 'Mit restore_drill.py kannst du eine Sicherung auf dem Server isoliert prüfen.';
+  let detail = 'Die automatische Prüfung lässt sich unter Zeitpläne einrichten.';
   if (report?.state === 'passed') {
     const n = report.counts;
     label = 'Sicherung erfolgreich geprüft · '+formatDate(report.checked_at);
     detail = 'Verbindungsprofile: '+n.profiles+' · Bestätigte gPodder-Ereignisse: '+n.confirmed+' · Ausstehende Aktionen im Abrufpaket: '+n.pending_actions;
   } else if (report?.state === 'failed') {
     label = 'Wiederherstellungsprobe fehlgeschlagen · '+formatDate(report.checked_at);
-    detail = 'Bitte prüfen: '+failure[report.error]+'.';
+    detail = restoreFailure(report.error);
   } else if (report?.state === 'unreadable') {
     label = 'Der Prüfbericht konnte nicht gelesen werden.';
     detail = 'Prüfe den Bericht und die Leserechte im Ordner control/restore-check.';
+  }
+  const plan=report?.schedule;
+  if (['failed','not_running'].includes(plan?.state)
+      && (plan.state==='not_running' || !report.checked_at || (plan.checked_at||0)>=report.checked_at)) {
+    label=plan.state==='not_running'?'Die geplante Wiederherstellungsprobe ist überfällig.':'Die geplante Wiederherstellungsprobe ist fehlgeschlagen.';
+    detail=restoreFailure(plan.error || plan.state);
+    if (report.state==='passed') detail+=' Letzte bestandene Probe am '+formatDate(report.checked_at)+'.';
   }
   text('restore-check-result',label);
   text('restore-check-detail',detail);
@@ -278,6 +282,31 @@ function conflictRetry(type,id){
 function scheduleInputs() {
   return $('schedule-form').querySelectorAll('[data-schedule]');
 }
+function restoreFailure(code) {
+  const reasons = {
+    main_backup:'Die Sicherung des Hauptdienstes konnte nicht wiederhergestellt werden.',
+    accounts:'Die Prüfung von Konten und Schlüsseln ist fehlgeschlagen.',
+    approvals_progress:'Die Prüfung der Freigaben und Fortschritte ist fehlgeschlagen.',
+    relay_backup:'Die Sicherung des gPodder-Relays konnte nicht wiederhergestellt werden.',
+    relay_cursor:'Der gPodder-Abrufstand oder die offenen Übertragungen konnten nicht bestätigt werden.',
+    account_match:'Hauptdienst und Relay melden unterschiedliche Konten.',
+    backup_missing:'Für die geplante Probe fehlt eine Sicherung.',
+    backup_stale:'Die Sicherung überschreitet das eingestellte Höchstalter.',
+    backup_pair:'Die Sicherungen von Hauptdienst und Relay konnten nicht als zusammengehörig bestätigt werden.',
+    not_running:'Die geplante Probe ist überfällig. Prüfe den Wiederherstellungsdienst in Dockge.'
+  };
+  return reasons[code] || 'Die Wiederherstellungsprobe ist fehlgeschlagen. Prüfe den Bericht auf dem Server.';
+}
+function restoreScheduleText(schedule, enabled) {
+  if (!enabled) return 'Automatische Wiederherstellungsprobe ausgeschaltet.';
+  if (!schedule || schedule.state==='disabled') return 'Eingeschaltet. Der erste Termin des Wiederherstellungsdienstes steht aus.';
+  const details=[];
+  if (['failed','not_running'].includes(schedule.state)) details.push(restoreFailure(schedule.error || schedule.state));
+  if (schedule.checked_at) details.push('Letzte geplante Probe am '+formatDate(schedule.checked_at));
+  if (schedule.backup_at) details.push('Stand der geprüften Sicherung vom '+formatDate(schedule.backup_at));
+  if (schedule.next_at) details.push('Nächste Probe am '+formatDate(schedule.next_at));
+  return details.join(' · ') || 'Der Wiederherstellungsdienst wartet auf die nächste Probe.';
+}
 function scheduleNotice(message) {
   text('schedule-message',message);
   $('schedule-message').hidden=!message;
@@ -285,6 +314,9 @@ function scheduleNotice(message) {
 function renderSchedule() {
   const schedule=state.status.schedule, available=Number.isInteger(schedule?.revision)&&schedule.values;
   for (const field of $('schedule-form').querySelectorAll('input')) field.disabled=!available||state.busy;
+  if (available) for (const field of scheduleInputs()) {
+    if (!Object.hasOwn(schedule.values,field.dataset.schedule)) field.disabled=true;
+  }
   if (available&&!state.scheduleDirty) {
     state.scheduleBase=schedule;
     for (const field of scheduleInputs()) {
@@ -301,6 +333,7 @@ function renderSchedule() {
   const pending=state.status.podcasts?.file_checks_pending;
   text('schedule-podcast-status',Number.isInteger(pending)?'Vorgemerkte Folgen beim letzten Lauf: '+pending:'Noch kein Stand der Warteschlange gemeldet.');
   const organizer=state.status.series_organizer||{}, values=schedule?.values||{};
+  text('schedule-restore-status',restoreScheduleText(state.status.restore_drill?.schedule, values.restore_enabled));
   const last=epoch(organizer.checked_at);
   const stale=last&&Date.now()-last>(Number(values.series_interval_seconds)+120)*1000;
   let message='Einsortierung ausgeschaltet.';
@@ -338,6 +371,7 @@ $('schedule-form').addEventListener('submit',async event=>{
     const changes={};
     for (const field of scheduleInputs()) {
       const name=field.dataset.schedule;
+      if (!Object.hasOwn(original.values,name)) continue;
       const value=field.type==='checkbox'?field.checked:field.type==='number'?field.valueAsNumber:field.value.trim();
       if (value!==original.values[name]) changes[name]=value;
     }
@@ -724,6 +758,8 @@ let openDeliveryState=null, openDeliveryRequest=0;
 function resetOpenDeliveries() {
   openDeliveryRequest++;
   openDeliveryState=null;
+  if ($('alias-dialog').open) $('alias-dialog').close();
+  resetAliasReview();
   clear($('open-delivery-rows'));
   text('open-delivery-status','');
   text('open-delivery-option','');
@@ -740,6 +776,10 @@ async function loadOpenDeliveries(offset=openDeliveryState?.offset || 0) {
     if (request!==openDeliveryRequest || !state.authenticated) return;
     if (page.state!=='ok') throw new Error(deliveryIssues[page.state] || 'Die Zustellungen sind derzeit nicht verfügbar.');
     if (!page.rows.length && offset>0) return loadOpenDeliveries(0);
+    if (aliasSelection && aliasSelection.scope!==page.scope) {
+      $('alias-dialog').close();
+      resetAliasReview();
+    }
     openDeliveryState=page;
     const list=$('open-delivery-rows');
     clear(list);
@@ -751,6 +791,9 @@ async function loadOpenDeliveries(offset=openDeliveryState?.offset || 0) {
       const attempts=['Noch kein erfasster Floppy-Abruf','1 Floppy-Abruf','Mindestens 2 Floppy-Abrufe'][item.poll_count];
       copy.append(element('small','muted',attempts+' · Letzter Zustellversuch: '+formatDate(item.last_attempt_at)));
       row.append(copy,button('Zustellung ansehen','secondary',()=>openDelivery('native_id',item.episode_id,item)));
+      if (item.event_id && ['tracking_rss_identity_changed','tracking_rss_identity_unresolved','tracking_rss_identity_ambiguous','legacy_blocked'].includes(item.code)) {
+        row.append(button('Audio-Adresse prüfen','secondary',()=>openAliasReview(item,page.scope)));
+      }
       list.append(row);
     }
     text('open-delivery-status',page.total ? (offset+1)+'–'+(offset+page.rows.length)+' von '+page.total+' offenen Zustellungen.' : 'Aktuell sind keine offenen Zustellungen erfasst.');
@@ -777,6 +820,110 @@ $('open-delivery-alerts').addEventListener('change',async()=>{
     if (state.authenticated) toast(error.message,true);
   }
   if (state.authenticated) await loadOpenDeliveries();
+});
+
+let aliasSelection=null;
+function resetAliasReview() {
+  aliasSelection=null;
+  clear($('alias-evidence'));
+  text('alias-episode','');
+  text('alias-status','');
+  $('alias-confirm').checked=false;
+  $('alias-confirm-label').hidden=true;
+  $('alias-apply').disabled=true;
+  $('alias-retry').hidden=true;
+}
+function aliasEvidence(label,value) {
+  $('alias-evidence').append(element('dt','',label),element('dd','',value));
+}
+function aliasReviewResult(review, result) {
+  review.token=null;
+  $('alias-confirm-label').hidden=true;
+  $('alias-confirm').checked=false;
+  $('alias-apply').disabled=true;
+  $('alias-retry').hidden=false;
+  clear($('alias-evidence'));
+  if (result.state==='approved') {
+    text('alias-status','Die Adresse ist für dieses Hörereignis freigegeben. Der nächste passende Floppy-Abruf kann den Hörstand übernehmen.');
+    $('alias-retry').hidden=true;
+    return;
+  }
+  if (result.state!=='ready' || !result.token) {
+    const explanations={
+      scope_mismatch:'Die PinePods-Verbindung hat sich geändert. Öffne die Folge über die aktuelle Zustellungsliste.',
+      stale:'Seit der Vorschau haben sich die Nachweise geändert. Prüfe die Adresse erneut.',
+      unavailable:'Die Freigabe ist momentan nicht verfügbar. Prüfe den Nachweisordner und den Freigabeordner des Trackingdienstes.',
+      waiting:'Für diese Folge fehlt ein aktueller, eindeutiger Nachweis der neuen Adresse. Ein späterer gPodder-Abruf prüft den RSS-Eintrag erneut.',
+      legacy:'Die Freigabe erfordert den nativen PinePods-Abgleich des Trackingdienstes.'
+    };
+    const reasons={
+      fresh_candidate:'Es liegt noch kein aktuelles, eindeutiges Adresspaar aus dem RSS-Feed vor. Prüfe den Stand nach dem nächsten Floppy-Abruf.',
+      source_guid:'Die Episodenkennung aus PinePods fehlt oder passt nicht zum aktuellen RSS-Eintrag. Prüfe den PinePods-Nachweis und rufe die Vorschau erneut auf.',
+      source_changed:'Der Hörstand oder die Zuordnung hat sich seit der Prüfung geändert. Öffne die Folge erneut in den Floppy-Zustellungen.',
+      exchange:'Der gemeinsame Freigabeordner ist nicht verfügbar. Prüfe seine Einbindung im Webdienst und im Tracking-Relay.'
+    };
+    text('alias-status',reasons[result.waiting_reason] || explanations[result.state] || 'Für diese Zustellung ist derzeit keine Adressfreigabe möglich.');
+    return;
+  }
+  review.token=result.token;
+  text('alias-status','Die Episodenkennung stimmt in PinePods und im aktuellen Feed eindeutig überein.');
+  aliasEvidence('Bisherige Audio-Adresse',result.old_host+' · Adresskennung '+result.old_digest.slice(0,16));
+  aliasEvidence('Neue Audio-Adresse',result.new_host+' · Adresskennung '+result.new_digest.slice(0,16));
+  if (result.changed_query_keys?.length) aliasEvidence('Geänderte URL-Parameter',result.changed_query_keys.join(', '));
+  aliasEvidence('Nachweis',result.proof==='native_guid'?'Episodenkennung aus dem PinePods-Ereignis und dem RSS-Feed':'Episodenkennung aus dem geprüften PinePods-Bestand und dem RSS-Feed');
+  const states={completed:'Gehört',in_progress:'Begonnen',unplayed:'Ungehört'};
+  if (states[result.status]) {
+    const time=result.status==='in_progress' && Number.isFinite(result.position)?' · '+durationLabel(result.position):'';
+    aliasEvidence('Hörstand',states[result.status]+time);
+  }
+  $('alias-confirm-label').hidden=false;
+  $('alias-retry').hidden=true;
+}
+async function openAliasReview(item,scope) {
+  resetAliasReview();
+  const review={item,scope,token:null,saving:false};
+  aliasSelection=review;
+  text('alias-episode',[item.show,item.title || item.episode_id].filter(Boolean).join(' · '));
+  text('alias-status','Episodenkennung und Audio-Adresse werden geprüft …');
+  const dialog=$('alias-dialog');
+  if (!dialog.open) dialog.showModal();
+  try {
+    const result=await api('/api/podcast-delivery/alias/preview',{scope,episode_id:item.episode_id,event_id:item.event_id});
+    if (aliasSelection===review && state.authenticated) aliasReviewResult(review,result);
+  } catch (error) {
+    if (aliasSelection!==review || !state.authenticated) return;
+    text('alias-status',error.message);
+    $('alias-retry').hidden=false;
+  }
+}
+$('alias-dialog').addEventListener('close',resetAliasReview);
+$('alias-confirm').addEventListener('change',()=>{
+  $('alias-apply').disabled=!aliasSelection?.token || aliasSelection.saving || !$('alias-confirm').checked;
+});
+$('alias-retry').addEventListener('click',()=>{
+  if (aliasSelection && !aliasSelection.saving) return openAliasReview(aliasSelection.item,aliasSelection.scope);
+});
+$('alias-apply').addEventListener('click',async()=>{
+  const review=aliasSelection;
+  if (!state.authenticated || !review?.token || review.saving || !$('alias-confirm').checked) return;
+  review.saving=true;
+  $('alias-apply').disabled=true;
+  $('alias-confirm').checked=false;
+  const {item,scope,token}=review;
+  review.token=null;
+  try {
+    const result=await api('/api/podcast-delivery/alias/approve',{scope,episode_id:item.episode_id,event_id:item.event_id,token,confirm:true});
+    if (aliasSelection!==review || !state.authenticated) return;
+    aliasReviewResult(review,result);
+    if (result.state==='approved') await loadOpenDeliveries();
+  } catch (error) {
+    if (aliasSelection!==review || !state.authenticated) return;
+    $('alias-confirm-label').hidden=true;
+    text('alias-status',error.message+' Prüfe vor einer erneuten Freigabe den aktuellen Stand.');
+    $('alias-retry').hidden=false;
+  } finally {
+    review.saving=false;
+  }
 });
 
 let deliverySearch=null, deliverySelection=null;
