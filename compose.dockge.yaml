@@ -75,7 +75,7 @@ services:
     restart: unless-stopped
     network_mode: none
     command: [python, restore_scheduler.py, --loop]
-    tmpfs: [/tmp:rw,nosuid,nodev,mode=1777,size=1g]
+    tmpfs: ["/tmp:rw,nosuid,nodev,mode=1777,size=1g"]
     environment:
       RESTORE_PRIMARY_ORIGIN: "${RESTORE_PRIMARY_ORIGIN:-}"
       RESTORE_RELAY_ORIGIN: "${RESTORE_RELAY_ORIGIN:-}"
