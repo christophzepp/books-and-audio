@@ -14,7 +14,7 @@
 </section>
 <div id="app-screen" class="app-shell" hidden>
   <aside class="sidebar"><a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true">↔</span><span>Books &amp; Audio<span class="brand-sub">Sync-Verwaltung</span></span></a>
-  <nav aria-label="Hauptnavigation"><button class="nav-item active" data-page="overview"><span aria-hidden="true">◫</span>Übersicht</button><button class="nav-item" data-page="books"><span aria-hidden="true">▤</span>Bücher</button><button class="nav-item" data-page="audiobooks"><span aria-hidden="true">♫</span>Hörbücher</button><button class="nav-item" data-page="podcasts"><span aria-hidden="true">◉</span>Podcasts</button><button class="nav-item" data-page="connections"><span aria-hidden="true">⇄</span>Verbindungen</button><button class="nav-item" data-page="folders"><span aria-hidden="true">▣</span>Medienordner</button><button class="nav-item" data-page="reviews"><span aria-hidden="true">✓</span>Freigaben<span id="review-count" class="nav-count" hidden></span></button><button class="nav-item" data-page="schedule"><span aria-hidden="true">◷</span>Zeitpläne</button><button class="nav-item" data-page="activity"><span aria-hidden="true">▥</span>Medienzugriffe</button><button class="nav-item" data-page="events"><span aria-hidden="true">≡</span>Protokoll</button></nav>
+  <nav aria-label="Hauptnavigation"><button class="nav-item active" data-page="overview"><span aria-hidden="true">◫</span>Übersicht</button><button class="nav-item" data-page="books"><span aria-hidden="true">▤</span>Bücher</button><button class="nav-item" data-page="audiobooks"><span aria-hidden="true">♫</span>Hörbücher</button><button class="nav-item" data-page="podcasts"><span aria-hidden="true">◉</span>Podcasts</button><button class="nav-item" data-page="deliveries"><span aria-hidden="true">⇥</span>Floppy-Zustellungen</button><button class="nav-item" data-page="connections"><span aria-hidden="true">⇄</span>Verbindungen</button><button class="nav-item" data-page="folders"><span aria-hidden="true">▣</span>Medienordner</button><button class="nav-item" data-page="reviews"><span aria-hidden="true">✓</span>Freigaben<span id="review-count" class="nav-count" hidden></span></button><button class="nav-item" data-page="schedule"><span aria-hidden="true">◷</span>Zeitpläne</button><button class="nav-item" data-page="activity"><span aria-hidden="true">▥</span>Medienzugriffe</button><button class="nav-item" data-page="events"><span aria-hidden="true">≡</span>Protokoll</button></nav>
   <div class="sidebar-bottom"><span class="privacy-dot"></span> Nur in deinem privaten Netz<button id="logout-button" class="quiet">Abmelden</button></div></aside>
   <main class="main"><header class="page-header"><div><p class="eyebrow">BIBLIOTHEKEN VERBINDEN</p><h1 id="page-title">Alles im Blick</h1><p id="page-description" class="muted">Hörpositionen und Lesestände, zuverlässig verbunden.</p></div><button id="refresh-button" class="secondary">Aktualisieren</button></header>
   <div id="global-message" class="notice" role="status" hidden></div>
@@ -32,6 +32,7 @@
       <div id="attention-podcasts" class="issue-list"></div>
     </section>
     <section class="panel"><div class="panel-head"><div><h2>Letzter Abgleich</h2><p id="last-run" class="muted">Noch keine Angaben verfügbar.</p></div><button class="quiet" data-go="events">Protokoll öffnen →</button></div><div id="recent-events" class="event-list"></div></section>
+    <section class="panel"><h2>Letzte Wiederherstellungsprobe</h2><p id="restore-check-result" role="status"></p><p id="restore-check-detail" class="muted"></p></section>
   </section>
   <section id="page-books" class="page" hidden>
     <section id="ebook-import-section" class="panel" hidden><div class="panel-head"><div><h2>Offene E-Book-Importe</h2><p class="muted">Fehlgeschlagene Importe werden mit Abstand oder nach einer Dateiänderung erneut geprüft. Bereits zugeordnete Bücher laufen weiter.</p></div><button id="ebook-retry-all" class="secondary">Offene Importe erneut prüfen</button></div><p class="help">Eine ausdrückliche Prüfung kann auf die Medienfestplatte zugreifen. Hörstände und Freigaben bleiben erhalten.</p><div id="ebook-import-list" class="issue-list"></div></section>
@@ -83,6 +84,7 @@
       </form></details>
     </section>
     <section class="panel">
+      <button type="button" class="secondary" data-go="deliveries">Offene Floppy-Zustellungen ansehen</button>
       <details class="podcast-settings" id="delivery-search-panel">
         <summary>Floppy-Zustellung für eine PinePods-Folge prüfen</summary>
         <form id="delivery-search-form" class="list-tools">
@@ -147,6 +149,17 @@
       <div class="card-actions"><button id="schedule-save" class="primary" type="submit" disabled>Zeitplan speichern</button><button id="schedule-reset" class="secondary" type="button" disabled>Änderungen verwerfen</button></div>
       <p id="schedule-message" class="notice" role="status" hidden></p>
     </form>
+  </section>
+  <section id="page-deliveries" class="page" hidden>
+    <div class="card">
+      <label class="checkbox-label"><input id="open-delivery-alerts" type="checkbox" disabled><span>Offene Zustellungen nach zwei Floppy-Abrufen über ntfy melden</span></label>
+      <p id="open-delivery-option" class="help"></p>
+    </div>
+    <div class="card"><div class="section-heading"><h2>Offene Zustellungen</h2></div>
+      <p id="open-delivery-status" class="muted" role="status"></p>
+      <div id="open-delivery-rows"></div>
+      <div class="actions"><button id="open-delivery-prev" class="secondary" hidden>Zurück</button><button id="open-delivery-next" class="secondary" hidden>Weiter</button></div>
+    </div>
   </section>
   <section id="page-activity" class="page" hidden>
     <section class="panel"><div class="panel-head"><h2>Messzeitraum</h2><label class="compact-label">Zeitraum<select id="activity-range"><option value="1">Letzte 24 Stunden</option><option value="7">Letzte 7 Tage</option></select></label></div>
