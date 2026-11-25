@@ -7,6 +7,7 @@ GUI queue. A preview is valid only in this Bridge instance for ten minutes.
 from __future__ import annotations
 
 import copy
+from contextlib import closing
 import datetime as dt
 import hashlib
 import json
@@ -196,7 +197,7 @@ def _backup(bridge, record):
     stem = record['review_digest'][:16] + '-' + uuid.uuid4().hex
     path = directory / (stem + '.sqlite')
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600); os.close(fd)
-    with sqlite3.connect(path) as destination:
+    with closing(sqlite3.connect(path)) as destination, destination:
         bridge.db.backup(destination)
         if destination.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise ReviewRefused('Review backup integrity check failed')

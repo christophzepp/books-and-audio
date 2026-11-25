@@ -1,8 +1,9 @@
-import contextlib
 import http.cookies
 import io
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import types
@@ -36,7 +37,7 @@ class WebTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.root=Path(self.tmp.name).resolve(); self.auth=web.Auth(self.root); self.store=Store(); self.jar={}
         self.server=types.SimpleNamespace(auth=self.auth,store=self.store,cookie_secure=False,allowed=web.allowed_hosts('127.0.0.1,100.64.0.2,192.0.2.42:8790'),static=Path(web.__file__).parent/'admin_static')
-        self.clock=[1000.0]; self.auth.clock=lambda:self.clock[0]
+        self.clock=[1000.0]; self.auth.clock=lambda clock=self.clock:clock[0]
     def tearDown(self): self.tmp.cleanup()
     def request(self,method,path,payload=None,*,origin=True,csrf=True,host='127.0.0.1:8790',extra=(),raw=None):
         if raw is None: raw=web.json_bytes(payload) if payload is not None else b''
@@ -49,8 +50,7 @@ class WebTests(unittest.TestCase):
         headers.extend(extra)
         data=(method+' '+path+' HTTP/1.1\r\n'+''.join(k+': '+v+'\r\n' for k,v in headers)+'\r\n').encode()+raw
         socket=Socket(data)
-        with contextlib.redirect_stderr(io.StringIO()) as log: web.AdminHandler(socket,('127.0.0.1',1000),self.server)
-        self.assertEqual(log.getvalue(),'')
+        web.AdminHandler(socket,('127.0.0.1',1000),self.server)
         head,body=bytes(socket.output).split(b'\r\n\r\n',1); lines=head.decode().split('\r\n'); code=int(lines[0].split()[1]); response=[]
         for line in lines[1:]:
             key,value=line.split(':',1); response.append((key.lower(),value.strip()))
@@ -127,6 +127,20 @@ class WebTests(unittest.TestCase):
     def test_health_only_ok_and_host_guarded(self):
         code,body,_=self.request('GET','/health'); self.assertEqual(code,200); self.assertEqual(json.loads(body),{'ok':True})
         self.assertEqual(self.request('GET','/health',host='public.invalid')[0],403)
+    def test_request_logs_disclose_no_sensitive_input(self):
+        # stderr belongs to the entire process. Isolate the handler to test
+        # exactly its output while allowing diagnostics from other tests.
+        child = """
+import unittest
+from test_admin_web import WebTests
+result=unittest.TestResult()
+WebTests('test_queued_response_never_echoes_input').run(result)
+if not result.wasSuccessful():
+    raise RuntimeError(result.errors + result.failures)
+"""
+        result = subprocess.run([sys.executable, '-c', child], cwd=Path(__file__).parent,
+                                capture_output=True, text=True, timeout=30, check=True)
+        self.assertEqual(result.stderr,'')
     def test_private_api_requires_login(self):
         for path in ['/api/status','/api/connections','/api/events','/api/commands/'+ID]: self.assertEqual(self.request('GET',path)[0],401)
     def test_queued_response_never_echoes_input(self):

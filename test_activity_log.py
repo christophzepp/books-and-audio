@@ -1,6 +1,7 @@
 """Clearing the activity view must preserve active reviews and later work."""
 import datetime as dt
 import json
+from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -37,7 +38,7 @@ class ActivityLogTests(unittest.TestCase):
                         for delta in (-10, 10)]
         cache = [{'at': past, 'kind': 'old'}, {'at': future, 'kind': 'new'}]
         (self.store.control / 'sync-events.json').write_text(json.dumps(cache))
-        with sqlite3.connect(self.root/'state.sqlite') as db:
+        with closing(sqlite3.connect(self.root/'state.sqlite')) as db, db:
             db.executescript('CREATE TABLE events(at TEXT); CREATE TABLE operations(id TEXT);')
             db.executemany('INSERT INTO events VALUES (?)', [(past,), (future,)])
             db.execute("INSERT INTO operations VALUES ('active-transfer')")
@@ -49,7 +50,7 @@ class ActivityLogTests(unittest.TestCase):
         events = reopened.events()
         self.assertEqual(events['events'], [cache[1]])
         self.assertEqual([c['id'] for c in events['commands']], [pending])
-        with sqlite3.connect(self.root/'state.sqlite') as db:
+        with closing(sqlite3.connect(self.root/'state.sqlite')) as db, db:
             self.assertEqual(db.execute('SELECT at FROM events').fetchall(), [(future,)])
             self.assertEqual(db.execute('SELECT id FROM operations').fetchall(), [('active-transfer',)])
         self.assertEqual(reopened.claim()['id'], pending)

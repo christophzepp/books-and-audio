@@ -15,6 +15,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -90,8 +91,11 @@ class Relay:
                     from tracking_rss import TrackingResolver
                     self.resolver = TrackingResolver(config.get('aliases', []))
 
+    @contextmanager
     def db(self):
-        return sqlite3.connect(self.root / 'relay.sqlite', timeout=30)
+        with closing(sqlite3.connect(self.root / 'relay.sqlite', timeout=30)) as connection:
+            with connection:
+                yield connection
 
     @staticmethod
     def get(db, key):

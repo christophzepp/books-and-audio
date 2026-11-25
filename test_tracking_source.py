@@ -4,6 +4,7 @@ import copy
 import json
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock
 from urllib.parse import urlsplit
@@ -164,7 +165,7 @@ class NativeSourceTests(unittest.TestCase):
         # must remain admissible by the durable projector without future dates.
         import sqlite3
         from tracking_projection import NativeProjection
-        with sqlite3.connect(':memory:') as db:
+        with closing(sqlite3.connect(':memory:')) as db:
             emitted=NativeProjection.update(db,result,action_epoch(STAMP),recovery_ids=['2:11:1'])
         self.assertEqual(len(emitted),1)
         self.assertEqual(action_epoch(emitted[0]['timestamp']),action_epoch(STAMP))

@@ -1,6 +1,7 @@
 import base64
 import copy
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -24,6 +25,20 @@ class Upstream:
 
 
 class RelayTests(unittest.TestCase):
+    def test_connection_closes_after_commit_and_rollback(self):
+        with self.relay.db() as committed:
+            self.relay.set(committed, 'connection-test', 'before')
+        with self.assertRaises(sqlite3.ProgrammingError):
+            committed.execute('SELECT 1')
+        with self.assertRaisesRegex(ValueError, 'rollback'):
+            with self.relay.db() as interrupted:
+                self.relay.set(interrupted, 'connection-test', 'after')
+                raise ValueError('rollback')
+        with self.assertRaises(sqlite3.ProgrammingError):
+            interrupted.execute('SELECT 1')
+        with self.relay.db() as fresh:
+            self.assertEqual(self.relay.get(fresh, 'connection-test'), 'before')
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.up=Upstream();self.cfg=dict(upstream='https://pine.example.test',username='user',baseline=BASE,

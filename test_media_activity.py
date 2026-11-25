@@ -1,3 +1,4 @@
+from contextlib import closing
 from io import StringIO
 import json
 from pathlib import Path
@@ -108,7 +109,7 @@ class MediaActivityTests(unittest.TestCase):
         self.assertEqual(report['totals'],{'checks':1,'cycles':2})
         self.assertEqual(report['watcher'],[{'at':oldest,'reads':1,'writes':0}])
         self.assertEqual([entry['at'] for entry in report['details']],[oldest])
-        with a.sqlite3.connect(self.j.path) as db:
+        with closing(a.sqlite3.connect(self.j.path)) as db:
             self.assertEqual(db.execute('SELECT MIN(at) FROM details').fetchone(),(oldest,))
         with self.assertRaises(ValueError):
             self.j.report(8,now=self.now)
@@ -153,5 +154,5 @@ class MediaActivityTests(unittest.TestCase):
         with patch.object(a,'MAX_DETAILS',2):
             for at,title in ((self.now-5,'A'),(self.now-4,'B'),(self.now-500,'Alter Import')):
                 self.j.save({'details':[(at,'series',title,'series_target')],'counts':[]},self.now)
-        with a.sqlite3.connect(self.j.path) as db:
+        with closing(a.sqlite3.connect(self.j.path)) as db:
             self.assertEqual(db.execute('SELECT title FROM details ORDER BY at DESC').fetchall(),[('B',),('A',)])

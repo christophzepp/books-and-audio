@@ -294,7 +294,7 @@ class Administration:
         with tempfile.TemporaryDirectory(prefix='connection-check-', dir=self.store.control) as directory:
             path = Path(directory)
             data_path = bookorbit_scope.database(self.root,test_cfg)
-            with sqlite3.connect('file:' + str(data_path) + '?mode=ro', uri=True) as source, sqlite3.connect(bookorbit_scope.database(path,test_cfg,create=True)) as dest:
+            with closing(sqlite3.connect('file:' + str(data_path) + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(bookorbit_scope.database(path,test_cfg,create=True))) as dest:
                 source.backup(dest)
             shutil.copy2(self.root / 'deployment.json', path / 'deployment.json')
             try:
@@ -431,7 +431,7 @@ class Administration:
         return cfg
 
     def podcast_pending(self):
-        with sqlite3.connect('file:' + str(self.root / 'state.sqlite') + '?mode=ro', uri=True) as db:
+        with closing(sqlite3.connect('file:' + str(self.root / 'state.sqlite') + '?mode=ro', uri=True)) as db:
             for key, raw in db.execute("SELECT id,value FROM state WHERE id LIKE '_podcast:%' OR id LIKE '_podcast_status:%'"):
                 if json.loads(raw).get('pending'): return True
             return bool(db.execute("SELECT 1 FROM operations WHERE status='pending' AND (book LIKE '_podcast:%' OR book LIKE '_podcast_status:%') LIMIT 1").fetchone())
@@ -445,7 +445,7 @@ class Administration:
         if self.folders and not verified_folders: cfg = self.folders.effective(cfg)
         with tempfile.TemporaryDirectory(prefix='podcast-check-', dir=self.store.control) as directory:
             path = Path(directory)
-            with sqlite3.connect('file:' + str(self.root / 'state.sqlite') + '?mode=ro', uri=True) as source, sqlite3.connect(path / 'state.sqlite') as dest:
+            with closing(sqlite3.connect('file:' + str(self.root / 'state.sqlite') + '?mode=ro', uri=True)) as source, closing(sqlite3.connect(path / 'state.sqlite')) as dest:
                 source.backup(dest)
             shutil.copy2(self.root / 'deployment.json', path / 'deployment.json')
             candidate = None
@@ -545,14 +545,14 @@ class Administration:
     def validate_candidate(self, cfg, creds):
         """Read-only service checks and an isolated copy of all coordinator state."""
         cfg = self.instance_config(cfg)
-        with sqlite3.connect('file:' + str(bookorbit_scope.database(self.root,cfg)) + '?mode=ro', uri=True) as source:
+        with closing(sqlite3.connect('file:' + str(bookorbit_scope.database(self.root,cfg)) + '?mode=ro', uri=True)) as source:
             if source.execute("SELECT 1 FROM operations WHERE status='pending' LIMIT 1").fetchone():
                 raise ValueError('pending_operations')
             if any(json.loads(row[0]).get('pending') for row in source.execute('SELECT value FROM state')):
                 raise ValueError('pending_operations')
             with tempfile.TemporaryDirectory(prefix='provider-check-', dir=self.store.control) as directory:
                 path = Path(directory)
-                with sqlite3.connect(bookorbit_scope.database(path,cfg,create=True)) as dest: source.backup(dest)
+                with closing(sqlite3.connect(bookorbit_scope.database(path,cfg,create=True))) as dest: source.backup(dest)
                 shutil.copy2(self.root / 'deployment.json', path / 'deployment.json')
                 candidate = None
                 try:
@@ -1000,7 +1000,7 @@ def participant_block(root, cfg):
     scoped = bookorbit_scope.database(root, cfg)
     paths = [original, scoped] if scoped != original and scoped.exists() else [original]
     for path in paths:
-        with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             if db.execute("SELECT 1 FROM operations WHERE status='pending' LIMIT 1").fetchone():
                 return 'Ein Abgleich ist noch nicht abgeschlossen. Jellyfin wieder verbinden und den Vorgang prüfen.'
             for key, value in db.execute("SELECT id,value FROM state WHERE id LIKE '_jellyfin_%' OR id LIKE '_bookbridge_audio:%' OR id LIKE '_podcast:%' OR id LIKE '_podcast_status:%'"):

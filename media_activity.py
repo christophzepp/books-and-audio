@@ -1,6 +1,6 @@
 """Bounded, best-effort diagnostics on the state volume. Never opens a media path."""
 from collections import Counter, deque
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 import json
 import logging
@@ -96,7 +96,7 @@ class Journal:
     def save(self, packet, now, *, deduplicate=False):
         cutoff = int(now) - WEEK
         first_minute = (cutoff + 59) // 60
-        with sqlite3.connect(self.path, timeout=2) as db:
+        with closing(sqlite3.connect(self.path, timeout=2)) as db, db:
             if not self.ready:
                 db.executescript(SCHEMA)
                 self.path.chmod(0o600)

@@ -79,7 +79,7 @@ class ManualReviewTests(unittest.TestCase):
         self.assertEqual(proof['sha256_evidence']['kind'], 'user-review')
         self.assertEqual(proof['overlay']['content_version'], '2026-10-31T02:00:00.000Z')
         self.assertEqual(proof['sha256_evidence']['review_sha256'], record['review_digest'])
-        with sqlite3.connect(result['backup']) as backup:
+        with contextlib.closing(sqlite3.connect(result['backup'])) as backup:
             self.assertEqual(backup.execute('SELECT COUNT(*) FROM native_readalong_enrollments').fetchone()[0], 0)
             self.assertEqual(json.loads(backup.execute('SELECT value FROM state WHERE id=?', ('abs-book',)).fetchone()[0]), self.baseline)
         self.assertEqual(Path(result['backup']).stat().st_mode & 0o077, 0)

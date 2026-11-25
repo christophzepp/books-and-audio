@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from pathlib import Path
+from contextlib import closing
 import sqlite3
 import tempfile
 import time
@@ -29,19 +30,19 @@ class Fixture(unittest.TestCase):
                           version='10.11', audio_library_id='library', ebooks=[]))
         self.credentials = dict(abs_token='PRIVATE-ABS-TOKEN', bo_username='reader', bo_password='PRIVATE-BO-PASSWORD',
                                 jellyfin_token='PRIVATE-JF-TOKEN')
-        with sqlite3.connect(self.root / 'state.sqlite') as db:
+        with closing(sqlite3.connect(self.root / 'state.sqlite')) as db, db:
             db.executescript('CREATE TABLE state (id TEXT PRIMARY KEY,value TEXT);'
                              'CREATE TABLE operations (id TEXT PRIMARY KEY,book TEXT,value TEXT,status TEXT);')
             db.execute('INSERT INTO state VALUES (?,?)', ('book', json.dumps({'baseline': {'position': 90}})))
         (self.root / 'deployment.json').write_text(json.dumps({'ok': True, 'checked_at': time.time()}))
 
     def saved_state(self):
-        with sqlite3.connect(self.root / 'state.sqlite') as db:
+        with closing(sqlite3.connect(self.root / 'state.sqlite')) as db, db:
             return (db.execute('SELECT * FROM state ORDER BY id').fetchall(),
                     db.execute('SELECT * FROM operations ORDER BY id').fetchall())
 
     def put(self, key, value):
-        with sqlite3.connect(self.root / 'state.sqlite') as db:
+        with closing(sqlite3.connect(self.root / 'state.sqlite')) as db, db:
             db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', (key, json.dumps(value)))
 
 
@@ -285,7 +286,7 @@ class RuntimeTests(Fixture):
 
     def test_optional_jellyfin_disable_blocks_pending_operation_without_reconciliation(self):
         self.config['jellyfin']['enabled'] = False
-        with sqlite3.connect(self.root / 'state.sqlite') as db:
+        with closing(sqlite3.connect(self.root / 'state.sqlite')) as db, db:
             db.execute('INSERT INTO operations VALUES (?,?,?,?)', ('op', 'book', '{}', 'pending'))
         before = self.saved_state()
         self.assertIsNotNone(runtime.participant_block(self.root, self.config))

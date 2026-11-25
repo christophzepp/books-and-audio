@@ -2,6 +2,7 @@
 import copy
 import json
 from pathlib import Path
+from contextlib import closing
 import sqlite3
 from types import SimpleNamespace
 import unittest
@@ -110,7 +111,7 @@ class AdministrationExtensions(fixtures.Fixture):
         self.assertEqual(self.admin.manager.public()['revision'],1)
 
     def test_provider_preview_fails_with_pending_operation_without_candidate(self):
-        with sqlite3.connect(self.root/'state.sqlite') as db:
+        with closing(sqlite3.connect(self.root/'state.sqlite')) as db, db:
             db.execute('INSERT INTO operations VALUES (?,?,?,?)',('pending','book','{}','pending'))
         result=self.command('provider.preview',dict(expected_revision=0,provider='bookbridge'))
         self.assertEqual(result['status'],'failed')
