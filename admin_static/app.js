@@ -123,8 +123,8 @@ async function previewBookStart(book) {
       input.disabled=!row.selectable;
       const summary=(bookSourceNames[row.source]||row.source)+' · '+startingPosition(row);
       const copy=element('span','',summary);
-      if (!row.selectable) copy.append(element('small','help',row.status==='not_started'
-        ? 'Ein Zurücksetzen auf null ist bei dieser Erstfreigabe nicht verfügbar.' : 'Dieser Stand kann nicht übernommen werden.'));
+      if (!row.selectable) copy.append(element('small','help',row.reason || (row.status==='not_started'
+        ? 'Ein Zurücksetzen auf null ist bei dieser Erstfreigabe nicht verfügbar.' : 'Dieser Stand kann nicht übernommen werden.')));
       input.addEventListener('change',()=>{
         if (bookStart!==view || !input.checked || !row.selectable) return;
         view.source=row.source;
