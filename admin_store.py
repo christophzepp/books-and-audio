@@ -50,6 +50,12 @@ class AdminStore:
                 status TEXT NOT NULL, result TEXT, private_result BLOB, error TEXT,
                 created_at REAL NOT NULL, updated_at REAL NOT NULL);
               CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS floppy_monitor (
+                scope TEXT PRIMARY KEY, poll_id INTEGER NOT NULL, checked_at INTEGER NOT NULL);
+              CREATE TABLE IF NOT EXISTS floppy_cases (
+                scope TEXT NOT NULL, event_id TEXT NOT NULL, episode_id TEXT NOT NULL,
+                report TEXT NOT NULL, eligible INTEGER NOT NULL, notified INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (scope,event_id));
               CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT, kind TEXT, detail TEXT);
             ''')
         self.path.chmod(0o600)
@@ -158,6 +164,8 @@ class AdminStore:
         value['stale'] = age > 180
         value['age_seconds'] = round(age)
         if value['stale']: value.setdefault('summary', {})['healthy'] = False
+        from restore_status import read_report
+        value['restore_drill'] = read_report(self.control)
         return value
 
     def list_connections(self):

@@ -10,6 +10,7 @@ import argparse
 import base64
 import hashlib
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -23,6 +24,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import requests
 from tracking_delivery import ensure_delivery_schema, record_batch
+import tracking_outbox
 
 LIMIT = 32 * 1024 * 1024
 
@@ -81,6 +83,7 @@ class Relay:
                     record_batch(db, pending, offered_at=self.get(db, 'last_poll'))
                 db.execute('CREATE TABLE IF NOT EXISTS native_tracking_superseded '
                            '(event_id TEXT PRIMARY KEY, successor TEXT NOT NULL)')
+                tracking_outbox.ensure_schema(db, pending, self.get(db, 'native_blocked'), self.get(db, 'last_poll'))
                 native = config['native_source']
                 if not isinstance(native, dict): raise ValueError('invalid_native_tracking_source')
                 native_scope = encoded([self.upstream, self.username, native.get('user_id'),
@@ -213,51 +216,55 @@ class Relay:
         db.commit()
         if hasattr(self.resolver, 'begin_poll'): self.resolver.begin_poll()
         output, fingerprints, blocked = [], [], []
+        cursor = max(now, ack + 1)
         current = {row['id']: row for row in snapshots}
-        events = NativeProjection.events(db)
-        latest = {(e['_tracking_episode_id'], e['_tracking_generation']): e for e in events}
-        for event in events:
-            fingerprint = 'native:' + event['_tracking_event_id']
-            if db.execute('SELECT 1 FROM seen WHERE hash=?', (fingerprint,)).fetchone(): continue
-            if db.execute('SELECT 1 FROM native_tracking_superseded WHERE event_id=?',
-                          (event['_tracking_event_id'],)).fetchone(): continue
-            successor = latest[(event['_tracking_episode_id'], event['_tracking_generation'])]
-            if not event['_tracking_completed'] and successor['_tracking_event_id'] != event['_tracking_event_id']:
+        for event, successor in tracking_outbox.candidates(db):
+            ident = event['_tracking_event_id']
+            if not event['_tracking_completed'] and successor != ident:
                 # Never-delivered intermediate progress is superseded by a
                 # newer state in this same listen. This is not a consumer ACK.
                 db.execute('INSERT INTO native_tracking_superseded VALUES(?,?)',
-                           (event['_tracking_event_id'], successor['_tracking_event_id']))
+                           (ident, successor))
                 continue
             wire = dict(event)
             fresh = current.get(event['_tracking_episode_id'])
-            if fresh is None or fresh['podcast'] != event['podcast']:
-                blocked.append(event['_tracking_event_id']); continue
             # The pinned native account/podcast/episode ID proves an enclosure
             # refresh independently of titles and duration. Resolve its fresh
             # URL against current RSS while preserving the original event time.
-            wire['episode'] = fresh['episode']
-            if not event['_tracking_completed']:
+            reason = None
+            if fresh is None:
+                reason = 'native_episode_missing'
+            elif fresh['podcast'] != event['podcast']:
+                reason = 'native_feed_changed'
+            else:
+                wire['episode'] = fresh['episode']
+            if not reason and not event['_tracking_completed']:
                 # Floppy infers completion five seconds before total. Preserve
                 # PinePods' explicit unfinished state in that representation;
                 # the journal retains the exact native seconds.
                 wire['position'] = min(event['position'], event['total'] - 6)
                 if int(wire['position']) <= 0:
-                    blocked.append(event['_tracking_event_id']); continue
-            try:
-                item = self.resolver.resolve(wire)
-            except (ValueError, requests.RequestException):
-                # Keep the immutable event in the outbox. A transport cursor
-                # cannot acknowledge an unresolved identity or discard it.
-                blocked.append(event['_tracking_event_id']); continue
+                    reason = 'native_position_too_short'
+            if not reason:
+                try:
+                    item = self.resolver.resolve(wire)
+                except (ValueError, requests.RequestException) as error:
+                    # Resolver exceptions can include a private URL. Only persist
+                    # the known reason codes from our RSS resolver.
+                    reason = str(error) if str(error) in tracking_outbox.RSS_REASONS else 'resolver_unavailable'
+            tracking_outbox.record_attempt(db, ident, cursor, now, reason)
+            if reason:
+                blocked.append(ident)
+                continue
             item = {key: value for key, value in item.items() if not key.startswith('_tracking_')}
-            output.append(item); fingerprints.append(fingerprint)
-        cursor = max(now, ack + 1)
+            output.append(item); fingerprints.append('native:' + ident)
         pending = dict(actions=output, timestamp=cursor, fingerprints=fingerprints)
         record_batch(db, pending, offered_at=now)
         self.set(db, 'pending', pending)
         self.set(db, 'last_poll', now)
         self.set(db, 'native_scan', dict(at=now, scan_number=scan_number, episodes=len(snapshots),
-            source=getattr(self.native_source, 'last_status', {}), blocked=len(blocked)))
+            source=getattr(self.native_source, 'last_status', {}),
+            blocked=db.execute('SELECT count(*) FROM native_outbox WHERE reason IS NOT NULL').fetchone()[0]))
         self.set(db, 'native_blocked', blocked)
         return {'actions': output, 'timestamp': cursor}
 
@@ -269,18 +276,19 @@ class Relay:
                         pending_actions=len(pending['actions']) if pending else 0,
                         last_poll=self.get(db, 'last_poll'), seen=db.execute('SELECT count(*) FROM seen').fetchone()[0])
             if self.native_source is not None:
-                from tracking_projection import NativeProjection
-                events = NativeProjection.events(db)
                 result.update(native_scan=self.get(db, 'native_scan'),
-                    blocked=len(self.get(db, 'native_blocked') or []),
+                    blocked=db.execute('SELECT count(*) FROM native_outbox WHERE reason IS NOT NULL').fetchone()[0],
                     baseline_episodes=db.execute('SELECT count(*) FROM native_tracking_episodes').fetchone()[0],
-                    projected_events=len(events),
+                    projected_events=db.execute('SELECT plays FROM native_outbox_stats WHERE id=1').fetchone()[0],
                     superseded_events=db.execute('SELECT count(*) FROM native_tracking_superseded').fetchone()[0],
-                    outstanding_events=sum(not db.execute('SELECT 1 FROM seen WHERE hash=?',
-                        ('native:' + e['_tracking_event_id'],)).fetchone()
-                        and not db.execute('SELECT 1 FROM native_tracking_superseded WHERE event_id=?',
-                            (e['_tracking_event_id'],)).fetchone() for e in events))
+                    outstanding_events=db.execute('SELECT count(*) FROM native_outbox').fetchone()[0])
             return result
+
+    def record_floppy_poll(self, cursor):
+        if self.native_source is not None:
+            with self.db() as db:
+                db.execute('INSERT OR IGNORE INTO native_floppy_polls(cursor,polled_at) VALUES(?,?)',
+                           (cursor, int(self.clock())))
 
 
 def handler(relay):
@@ -293,6 +301,7 @@ def handler(relay):
             self.send_header('Content-Length', str(len(body))); self.send_header('Cache-Control', 'no-store')
             self.end_headers(); self.wfile.write(body)
         def dispatch(self):
+            floppy_actions = False
             try:
                 parsed = urlsplit(self.path)
                 if self.command == 'GET' and parsed.path == '/health':
@@ -315,11 +324,25 @@ def handler(relay):
                     if set(query) - {'since', 'device'} or any(len(v) != 1 for v in query.values()): raise ValueError('invalid_query')
                     since = int(query['since'][0]) if 'since' in query else None
                     result = relay.actions(since, query.get('device', [''])[0], authorization)
+                    floppy_actions = bool(re.fullmatch(r'Floppy/[0-9]+(?:\.[0-9]+)*(?: \(https://github\.com/dannyvfilms/Floppy\))?',
+                                                       self.headers.get('User-Agent', '')))
                 else:
                     self.respond(404, {'error': 'unsupported_endpoint'}); return
-                self.respond(200, result)
             except PermissionError: self.respond(401, {'error': 'authentication_required'})
             except Exception: self.respond(503, {'error': 'tracking_temporarily_unavailable'})
+            else:
+                try:
+                    self.respond(200, result)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                if floppy_actions:
+                    # The authenticated Floppy request was served; retransmitting
+                    # a cursor is the same fetch round. Never count an aborted
+                    # response, or emit a second HTTP status after a sent body.
+                    try:
+                        relay.record_floppy_poll(result['timestamp'])
+                    except sqlite3.Error:
+                        logging.getLogger(__name__).warning('Could not record Floppy fetch evidence')
         do_GET = dispatch
         do_POST = dispatch
     return Handler

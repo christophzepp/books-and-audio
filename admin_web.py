@@ -312,7 +312,7 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
     def handle_api(self):
         host = self.host()
         parsed = urlsplit(self.path)
-        delivery_route = self.command == "GET" and parsed.path in {"/api/podcast-delivery", "/api/podcast-delivery/search"}
+        delivery_route = self.command == "GET" and parsed.path in {"/api/podcast-delivery", "/api/podcast-delivery/search", "/api/podcast-delivery/open"}
         if parsed.scheme or parsed.netloc or parsed.fragment or "%" in parsed.path or (parsed.query and not delivery_route):
             raise WebError(404, "Die Seite wurde nicht gefunden.")
         path = parsed.path
@@ -335,6 +335,12 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             self.require_session(session)
             if delivery_route:
                 import admin_delivery
+                if path.endswith("/open"):
+                    from delivery_monitor import report
+                    match = re.fullmatch(r"offset=([0-9]{1,7})", parsed.query) if parsed.query else None
+                    if parsed.query and (not match or int(match[1]) > 1_000_000):
+                        raise WebError(400, "Ungültige Seitenauswahl.")
+                    return self.respond(200, report(self.server.store, int(match[1]) if match else 0))
                 search = path.endswith("/search")
                 try:
                     args = admin_delivery.parameters(parsed.query, search=search)
@@ -367,6 +373,15 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             token, csrf = method(payload, self.client_address[0], cookies.get(CSRF_COOKIE))
             return self.respond(200, {"ok": True}, cookies=[self.set_cookie(COOKIE, token, http_only=True), self.set_cookie(CSRF_COOKIE, csrf, max_age=SESSION_SECONDS)])
         self.require_session(session)
+        if path == "/api/podcast-delivery/alerts":
+            from delivery_monitor import configure
+            try:
+                result = configure(self.server.store, payload)
+            except ValueError:
+                raise WebError(400, "Ungültige Benachrichtigungseinstellung.") from None
+            except RuntimeError:
+                raise WebError(409, "Die Verbindung hat sich geändert. Bitte die Zustellungen aktualisieren.") from None
+            return self.respond(200, result)
         if path == "/api/logout":
             self.server.auth.logout(token)
             return self.respond(200, {"ok": True}, cookies=[self.set_cookie(COOKIE, "", http_only=True, clear=True), self.set_cookie(CSRF_COOKIE, "", clear=True)])
@@ -453,10 +468,15 @@ def main():
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    from delivery_monitor import watch
+    stop_monitor = threading.Event()
+    monitor = threading.Thread(target=watch, args=(server.store, stop_monitor), daemon=True)
+    monitor.start()
     print("Private sync administration listening", flush=True)
     try:
         server.serve_forever()
     finally:
+        stop_monitor.set()
         server.server_close()
     return 0
 

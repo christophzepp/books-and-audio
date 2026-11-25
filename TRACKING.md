@@ -118,7 +118,7 @@ Für die unabhängige Bestätigung in der Floppy-Datenbank:
 
 1. Lege auf der NVMe ein privates Verzeichnis für die Ergebnisdatei an. Binde es im Webdienst als `/tracking-proof:ro` ein. Die UID des Webdienstes benötigt Leserechte.
 2. Setze im Webdienst `FLOPPY_EVIDENCE_USER` auf den Floppy-Benutzernamen und `FLOPPY_EVIDENCE_RELAY_URL` auf die im Floppy-Konto gespeicherte Relay-Adresse. Übernimm diese beiden Werte in den folgenden Aufruf.
-3. Führe das Hilfsprogramm auf dem Docker-Host mit der UID des Webdienstes aus. Verwende dazu die Datei `floppy_snapshot_host.py` aus dem GitHub-Release. Sie liest den Exporter aus dem laufenden Books-&-Audio-Webcontainer. Im kurzlebigen Floppy-Prozess bleiben Wartungsjobs aus. Eine dort konfigurierte SQLite-Transaktion vom Typ `IMMEDIATE` beginnt für den Leseexport als `DEFERRED`. Der Exporter liest den Floppy-Stand in einer schreibgeschützten Transaktion. Der Helfer ersetzt die Ergebnisdatei erst nach vollständiger Prüfung.
+3. Führe das Hilfsprogramm auf dem Docker-Host mit der UID des Webdienstes aus. Verwende dazu die Quelldatei `floppy_snapshot_host.py` aus dem GitHub-Versionstag des installierten Images. Sie liest den Exporter aus dem laufenden Books-&-Audio-Webcontainer. Im kurzlebigen Floppy-Prozess bleiben Wartungsjobs aus. Eine dort konfigurierte SQLite-Transaktion vom Typ `IMMEDIATE` beginnt für den Leseexport als `DEFERRED`. Der Exporter liest den Floppy-Stand in einer schreibgeschützten Transaktion. Der Helfer ersetzt die Ergebnisdatei erst nach vollständiger Prüfung.
 
 ```sh
 python3 floppy_snapshot_host.py --web-container WEB --floppy-container FLOPPY \
@@ -128,3 +128,11 @@ python3 floppy_snapshot_host.py --web-container WEB --floppy-container FLOPPY \
 ```
 
 Setze für laufende Nachweise einen Host-Zeitplan, beispielsweise alle 30 Minuten. Nach drei Stunden gelten Belege als veraltet. Die Ergebnisdatei enthält gehashte Episodenschlüssel, Zustände und Zeitpunkte. Der Export schreibt keinen Hörverlauf und löst keinen Import aus. Ohne aktuellen, eindeutigen Treffer zeigt die GUI die nachweisbaren Transportschritte. Eine früher quittierte Lieferung kann auch nach dem Update ohne genaue Abrufzeit erscheinen.
+
+### Offene Floppy-Zustellungen und Benachrichtigungen
+
+Unter **Floppy-Zustellungen** zeigt Books & Audio ausstehende Episoden mit Ursache, letztem Zustellversuch und einem Link zum aktuellen Hörstand. Die Ansicht berücksichtigt die aktive PinePods-Verbindung. Der erste native Bestandsabgleich dient weiter als Ausgangsstand.
+
+Jeder erfolgreich beantwortete GPodder-Episodenabruf der regulären Floppy-Integration zählt einmal je Antwortcursor. Wiederholungen desselben Abrufs und das Öffnen der GUI erhöhen den Zähler nicht. Ein bestätigter Empfang ist am zugehörigen GPodder-Cursor erkennbar. Mit eingerichtetem Floppy-Export bleibt die Folge bis zum passenden Hörstand im Ziel sichtbar. Ein veralteter, mehrdeutiger oder unvollständiger Nachweis wird als ausstehend angezeigt.
+
+Mit einem aktiven ntfy-Profil lässt sich die Benachrichtigung auf dieser Seite einschalten. Ab der Aktivierung zählen zwei unterschiedliche Floppy-Abrufe, während die Zustellung offen ist. Der Worker fasst neue Fälle in einer Meldung zusammen. Für Meldungen zum Zielstand muss ein aktueller Floppy-Export auch den zweiten Abruf abdecken. Die Auswertung läuft bei geschlossener GUI weiter und liest die Relay-Datenbank und die Nachweisdatei auf der NVMe.

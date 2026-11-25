@@ -27,6 +27,23 @@ class Socket:
     def sendall(self,raw): self.output.extend(raw)
     def settimeout(self,value): pass
 class WebTests(unittest.TestCase):
+    def test_open_delivery_dashboard_and_notification_setting_require_a_scoped_authenticated_request(self):
+        endpoint='/api/podcast-delivery/open'
+        settings='/api/podcast-delivery/alerts'
+        self.assertEqual(self.request('GET',endpoint)[0],401)
+        self.bootstrap()
+        for query in ('offset=-1','wrong=1','offset=1&offset=0','offset=1000001'):
+            self.assertEqual(self.request('GET',endpoint+'?'+query)[0],400)
+        with patch('delivery_monitor.report',return_value={'state':'ok','rows':[]}) as read:
+            self.assertEqual(self.request('GET',endpoint+'?offset=40')[0],200)
+            self.assertEqual(read.call_args.args[1],40)
+        with patch('delivery_monitor.configure',return_value={'enabled':True}) as save:
+            payload={'enabled':True,'scope':'test','guard':'test'}
+            self.assertEqual(self.request('POST',settings,payload,csrf=False)[0],403)
+            save.assert_not_called()
+            self.assertEqual(self.request('POST',settings,payload)[0],200)
+            self.assertEqual(save.call_args.args[1],payload)
+
     def test_folders_require_auth_and_mutations_require_csrf(self):
         self.assertEqual(self.request('GET','/api/folders')[0],401)
         self.bootstrap()

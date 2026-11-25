@@ -28,10 +28,10 @@ function fixture() {
     button:(label,cls,handler)=>Object.assign(element('button',cls,label),{onclick:handler}),
     text:(id,value)=>{$(id).textContent=String(value);},formatDate:String,toast(){},
     runCommand:(kind,payload)=>new Promise((resolve,reject)=>calls.push({kind,payload:JSON.parse(JSON.stringify(payload)),resolve,reject})),
-    api:path=>new Promise((resolve,reject)=>requests.push({path,resolve,reject}))});
+    api:(path,body)=>new Promise((resolve,reject)=>requests.push({path,body,resolve,reject}))});
   for (const [from,to] of [
     ['function bookPosition(','function renderLibrary('],['function durationLabel(','function episodeReviewButton('],
-    ['let bookStart = null','async function previewMissing('],['let deliverySearch=null','const episodePeerNames=']
+    ['let bookStart = null','async function previewMissing('],['let openDeliveryState=null','const episodePeerNames=']
   ]) vm.runInContext(app.slice(app.indexOf(from),app.indexOf(to)),ctx);
   return {$,ctx,calls,requests,state};
 }
@@ -128,4 +128,37 @@ test('stale search and detail responses cannot populate the UI after another sel
   assert.equal(h.$('delivery-results').children.length,0);
   assert.equal(h.$('delivery-stages').children.length,0);
   assert.equal(h.$('delivery-episode').content(),'');
+});
+
+test('open Floppy deliveries link the exact episode, paginate and save opt-in for the rendered scope',async()=>{
+  const h=fixture();
+  const item={title:'Aktuell',show:'Podcast',episode_id:'2:13:32',reason:'RSS-Feed nicht erreichbar',action:'Feed prüfen',last_attempt_at:97,poll_count:2};
+  const page={state:'ok',total:41,rows:[item],offset:0,has_more:true,scope:'source',guard:'destination',notification_enabled:false};
+  const load=h.ctx.loadOpenDeliveries(0);
+  assert.equal(h.requests[0].path,'/api/podcast-delivery/open?offset=0');
+  h.requests[0].resolve(page);await load;
+  const row=h.$('open-delivery-rows').children[0];
+  assert.match(row.content(),/RSS-Feed nicht erreichbar/);
+  assert.match(row.content(),/Feed prüfen/);
+  assert.match(row.content(),/Mindestens 2 Floppy-Abrufe/);
+  assert.equal(h.$('open-delivery-alerts').checked,false);
+  const detail=row.children[1].onclick();
+  assert.equal(h.requests[1].path,'/api/podcast-delivery?native_id=2%3A13%3A32');
+  h.requests[1].resolve({state:'not_found'});await detail;
+  const next=h.$('open-delivery-next').onclick();
+  assert.equal(h.requests[2].path,'/api/podcast-delivery/open?offset=40');
+  h.requests[2].resolve({...page,offset:40,has_more:false});await next;
+  assert.equal(h.$('open-delivery-next').hidden,true);
+  h.$('open-delivery-alerts').checked=true;
+  const opt=h.$('open-delivery-alerts').onchange();
+  assert.equal(h.requests[3].path,'/api/podcast-delivery/alerts');
+  assert.deepEqual({...h.requests[3].body},{enabled:true,scope:'source',guard:'destination'});
+  h.requests[3].resolve({enabled:true});await new Promise(resolve=>setImmediate(resolve));
+  h.requests[4].resolve({...page,notification_enabled:true});await opt;
+  assert.equal(h.$('open-delivery-alerts').checked,true);
+  const stale=h.ctx.loadOpenDeliveries();
+  h.state.authenticated=false;
+  h.ctx.resetOpenDeliveries();h.requests[5].resolve(page);await stale;
+  assert.equal(h.$('open-delivery-rows').children.length,0);
+  assert.equal(h.$('open-delivery-alerts').disabled,true);
 });

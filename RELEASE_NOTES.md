@@ -1,3 +1,9 @@
+## 0.1.0-beta.18 – Offene Zustellungen und Wiederherstellungsprobe
+
+- Die Podcastansicht bündelt offene Floppy-Zustellungen. Zu jeder betroffenen Folge lassen sich der letzte Versuch, der Grund und der nächste mögliche Schritt nachsehen. Die optionale Benachrichtigung berücksichtigt tatsächliche Floppy-Abrufe.
+- Das gPodder-Relay merkt offene Hörereignisse in SQLite vor. Bereits bestätigte Ereignisse bleiben im Verlauf und werden bei der Auswahl für den nächsten Abruf übersprungen. Ein ausstehendes Abrufpaket bleibt bis zu seiner Bestätigung wiederholbar.
+- Eine isolierte Wiederherstellungsprobe prüft die Sicherungen von Hauptdienst und Relay. Sie kontrolliert unter anderem Verbindungsprofile, Schlüssel, gespeicherte Freigaben und Fortschritte sowie den letzten bestätigten gPodder-Abruf. Ein Prüfbericht kann in der Übersicht angezeigt werden.
+
 ## 0.1.0-beta.17 – Zustellung an Floppy und Anfangsstände
 
 - In der Podcastliste zeigt die Zustellhistorie den zuletzt beobachteten PinePods-Stand und den letzten Übergabeschritt an Floppy. Die Suche umfasst auch Folgen ohne lokalen Download.

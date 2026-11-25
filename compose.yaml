@@ -1,7 +1,7 @@
 name: books-and-audio
 x-service: &service
   build: .
-  image: books-and-audio:0.1.0-beta.17
+  image: books-and-audio:0.1.0-beta.18
   user: "${APP_UID:-1000}:${APP_GID:-1000}"
   init: true
   read_only: true

@@ -29,25 +29,36 @@ def parameters(query, *, search):
     raise ValueError('invalid_episode')
 
 
-def report(store, args, *, search, env=None):
+def relay_context(store, env=None, *, view=None):
     env = os.environ if env is None else env
     db = Path(env.get('TRACKING_DELIVERY_DB', '/tracking-readonly/relay.sqlite'))
-    profiles = [p for p in store.list_connections().get('profiles', [])
+    view = store.list_connections() if view is None else view
+    profiles = [p for p in view.get('profiles', [])
                 if p.get('kind') == 'pinepods' and p.get('active') is True]
     settings = profiles[0]['settings'] if len(profiles) == 1 else {}
     upstream, username = settings.get('url', '').rstrip('/'), settings.get('username')
     if not upstream or not username:
-        return {'state': 'scope_mismatch'}
+        return None
     if upstream == env.get('TRACKING_PROFILE_ORIGIN', '').rstrip('/'):
         upstream = env.get('TRACKING_RELAY_UPSTREAM', '').rstrip('/')
         if not upstream:
-            return {'state': 'scope_mismatch'}
+            return None
     scope = {'upstream': upstream, 'username': username}
     pin = env.get('TRACKING_PINE_USER_ID', '')
     if pin:
         if not re.fullmatch(r'[1-9][0-9]{0,18}', pin):
-            return {'state': 'scope_mismatch'}
+            return None
         scope['user_id'] = int(pin)
+    return db, scope
+
+
+def report(store, args, *, search, env=None):
+    env = os.environ if env is None else env
+    context = relay_context(store, env)
+    if context is None:
+        return {'state': 'scope_mismatch'}
+    db, scope = context
+    upstream, username = scope['upstream'], scope['username']
     if search:
         return search_episode_delivery(db, **scope, **args)
     if 'native_id' in args:

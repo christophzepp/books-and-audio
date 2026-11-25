@@ -50,7 +50,7 @@ def load_snapshot(path):
         return json.loads(raw)
 
 
-def attach_floppy_evidence(data, path, *, upstream, username, floppy_user, relay_url, now=None, max_age=MAX_AGE):
+def attach_floppy_evidence(data, path, *, upstream, username, floppy_user, relay_url, now=None, max_age=MAX_AGE, snapshot=None):
     """Return public fields. Even disabled/invalid exports must strip the private match keys."""
     public = dict(data)
     match = public.pop('delivery_match', None)
@@ -63,7 +63,8 @@ def attach_floppy_evidence(data, path, *, upstream, username, floppy_user, relay
         return public
     try:
         now = time.time() if now is None else now
-        snapshot = load_snapshot(path)
+        if snapshot is None:
+            snapshot = load_snapshot(path)
         observed = snapshot['observed_at']
         synced = snapshot['synced_at']
         ready = event['ready_at']
@@ -148,12 +149,17 @@ def export_snapshot(*, floppy_user, relay_url, pine_user, upstream):
         observed = time.time()
         rows = Podcast.objects.filter(user_id=account.user_id, episode_id__isnull=False).order_by('-created_at','-pk').values(
             'episode__show__rss_feed_url','episode__audio_url','episode__show_id','show_id','episode_id',
-            'item__source','status','played_up_to_seconds','position_updated_at','created_at','end_date')[:MAX_ROWS]
+            'item__source','status','played_up_to_seconds','position_updated_at','created_at','end_date')[:MAX_ROWS + 1]
         entries, feeds = {}, set()
-        for row in rows.iterator(chunk_size=500):
+        truncated = False
+        for index, row in enumerate(rows.iterator(chunk_size=500)):
+            if index == MAX_ROWS:
+                truncated = True
+                break
             feed, audio = row['episode__show__rss_feed_url'], row['episode__audio_url']
             if not feed or not audio:
                 continue
+            feeds.add(feed)
             identity = digest([feed, audio])
             if identity in entries:
                 continue  # Floppy uses newest-created history rows for subsequent listens.
@@ -167,7 +173,6 @@ def export_snapshot(*, floppy_user, relay_url, pine_user, upstream):
                     or not completed and row['status'] != Status.IN_PROGRESS.value):
                 continue
             entries[identity] = dict(seconds=seconds, completed=completed, updated_at=when, end_at=stamp(row['end_date']))
-            feeds.add(feed)
         # A feed can exist under more than one show ID (e.g. an iTunes copy).
         # Never use progress from a duplicate identity as evidence for the selected entry.
         feed_list = sorted(feeds)
@@ -175,9 +180,12 @@ def export_snapshot(*, floppy_user, relay_url, pine_user, upstream):
             duplicate = PodcastEpisode.objects.filter(show__rss_feed_url__in=feed_list[start:start+300]).order_by().values(
                 'show__rss_feed_url','audio_url').annotate(matches=Count('pk')).filter(matches__gt=1)
             for row in duplicate.iterator(chunk_size=500):
-                entries.pop(digest([row['show__rss_feed_url'], row['audio_url']]), None)
-        return dict(version=1, observed_at=observed, synced_at=stamp(account.last_sync_at),
+                identity = digest([row['show__rss_feed_url'], row['audio_url']])
+                if identity in entries:
+                    entries[identity] = None
+        return dict(version=1, truncated=truncated, observed_at=observed, synced_at=stamp(account.last_sync_at),
                     cursor=account.episode_actions_since, scope=scope(upstream, pine_user, floppy_user, relay_url),
+                    excluded=[key for key,value in entries.items() if value is None],
                     episodes={key:value for key,value in entries.items() if value is not None})
 
 

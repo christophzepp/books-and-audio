@@ -1037,6 +1037,7 @@ def _admin_loop(args, root, config, credentials, bridge_type, journal, activity)
     except Exception: pass  # Existing sync safety checks still govern operation.
     bridge, signature, next_cycle = None, None, 0
     next_preview = 0
+    next_delivery_notice = 0
     def serve_preview():
         nonlocal next_preview
         if time.monotonic() >= next_preview:
@@ -1047,6 +1048,13 @@ def _admin_loop(args, root, config, credentials, bridge_type, journal, activity)
         while True:
             journal.flush(activity)
             cfg, creds, disabled = admin.effective()
+            if time.monotonic() >= next_delivery_notice:
+                from delivery_monitor import INTERVAL, send_pending
+                next_delivery_notice = time.monotonic() + INTERVAL
+                try:
+                    send_pending(admin, cfg, creds)
+                except (OSError, ValueError, sqlite3.Error):
+                    pass
             disabled = disabled or participant_block(root, cfg)
             if disabled == 'required_connection_disabled':
                 disabled = 'Audiobookshelf oder der gewählte Zuordnungsdienst ist nicht aktiv verbunden.'

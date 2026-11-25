@@ -112,49 +112,57 @@ def read_episode_delivery(db_path, *, episode_id=None, lookup_hash=None, feed_ur
                 or not re.fullmatch(r'[0-9a-f]{64}', lookup_hash))):
         raise ValueError('invalid_delivery_lookup')
 
-    def select(db):
-        key = 'id' if episode_id is not None else 'lookup_hash'
-        records = db.execute('SELECT id,snapshot,generation,sequence,observed_at,scan_number FROM native_tracking_episodes '
-                             'WHERE ' + key + '=? LIMIT 2', (episode_id or lookup_hash,)).fetchall()
-        if len(records) != 1:
-            return {'state': 'ambiguous' if records else 'not_found'}
-        ident, raw, generation, sequence, observed_at, scan_number = records[0]
-        snapshot = json.loads(raw)
-        source = {k: snapshot.get(k) for k in ('position', 'total', 'completed', 'published_at', 'updated_at')}
-        latest_scan = _state(db, 'native_inventory_scan')
-        source.update(observed_at=observed_at, present_in_last_scan=(
-            scan_number == latest_scan if latest_scan is not None else None))
-        latest = db.execute('''SELECT event_id,observed_at,payload FROM native_tracking_events
-            WHERE episode_id=? AND generation=? AND sequence=? AND kind='play' ''',
-            (ident, generation, sequence)).fetchone()
-        event = dict(stage='no_event' if generation else 'baseline', ready_at=None,
-                     offered_at=None, cursor=None, acknowledged_at=None)
-        identity = lookup_key(snapshot['podcast'], snapshot['episode'])
-        multiplicity = db.execute('SELECT count(*) FROM native_tracking_episodes WHERE lookup_hash=?',
-                                  (identity,)).fetchone()[0]
-        match = dict(lookup_hash=identity, unique=multiplicity == 1, wire_hash=None, wire_guid_hash=None,
-                     wire_unique=False, wire_timestamp=None, wire_position=None, wire_total=None)
-        if latest:
-            event_id, ready_at, payload = latest
-            event.update(stage='ready', ready_at=ready_at, action_timestamp=json.loads(payload)['timestamp'])
-            receipt = db.execute('SELECT cursor,offered_at,acknowledged_at,wire_hash,wire_guid_hash,'
-                                 'wire_timestamp,wire_position,wire_total FROM native_delivery_receipts '
-                                 'WHERE event_id=?', (event_id,)).fetchone()
-            if receipt:
-                event.update(cursor=receipt[0], offered_at=receipt[1], acknowledged_at=receipt[2],
-                             stage='acknowledged' if receipt[2] is not None else 'offered')
-                other = db.execute('''SELECT 1 FROM native_delivery_receipts r
-                    JOIN native_tracking_events e ON e.event_id=r.event_id
-                    WHERE r.wire_hash=? AND e.episode_id!=? LIMIT 1''', (receipt[3], ident)).fetchone()
-                match.update(wire_hash=receipt[3], wire_guid_hash=receipt[4], wire_unique=other is None,
-                             wire_timestamp=receipt[5], wire_position=receipt[6], wire_total=receipt[7])
-            if event['acknowledged_at'] is None and db.execute(
-                    'SELECT 1 FROM seen WHERE hash=?', ('native:' + event_id,)).fetchone():
-                # An older binary may have confirmed this event before the
-                # upgrade or during a rollback. Only the fact is known.
-                event['stage'] = 'acknowledged'
-            elif not receipt and event_id in (_state(db, 'native_blocked') or []):
+    return _read(db_path, upstream, username, user_id,
+                 lambda db: episode_record(db, episode_id=episode_id, lookup_hash=lookup_hash))
+
+
+def episode_record(db, *, episode_id=None, lookup_hash=None):
+    key = 'id' if episode_id is not None else 'lookup_hash'
+    records = db.execute('SELECT id,snapshot,generation,sequence,observed_at,scan_number FROM native_tracking_episodes '
+                         'WHERE ' + key + '=? LIMIT 2', (episode_id or lookup_hash,)).fetchall()
+    if len(records) != 1:
+        return {'state': 'ambiguous' if records else 'not_found'}
+    ident, raw, generation, sequence, observed_at, scan_number = records[0]
+    snapshot = json.loads(raw)
+    source = {k: snapshot.get(k) for k in ('position', 'total', 'completed', 'published_at', 'updated_at')}
+    latest_scan = _state(db, 'native_inventory_scan')
+    source.update(observed_at=observed_at, present_in_last_scan=(
+        scan_number == latest_scan if latest_scan is not None else None))
+    latest = db.execute('''SELECT event_id,observed_at,payload FROM native_tracking_events
+        WHERE episode_id=? AND generation=? AND sequence=? AND kind='play' ''',
+        (ident, generation, sequence)).fetchone()
+    event = dict(stage='no_event' if generation else 'baseline', ready_at=None,
+                 offered_at=None, cursor=None, acknowledged_at=None)
+    identity = lookup_key(snapshot['podcast'], snapshot['episode'])
+    multiplicity = db.execute('SELECT count(*) FROM native_tracking_episodes WHERE lookup_hash=?',
+                              (identity,)).fetchone()[0]
+    match = dict(lookup_hash=identity, unique=multiplicity == 1, wire_hash=None, wire_guid_hash=None,
+                 wire_unique=False, wire_timestamp=None, wire_position=None, wire_total=None)
+    if latest:
+        event_id, ready_at, payload = latest
+        event.update(stage='ready', ready_at=ready_at, action_timestamp=json.loads(payload)['timestamp'])
+        receipt = db.execute('SELECT cursor,offered_at,acknowledged_at,wire_hash,wire_guid_hash,'
+                             'wire_timestamp,wire_position,wire_total FROM native_delivery_receipts '
+                             'WHERE event_id=?', (event_id,)).fetchone()
+        if receipt:
+            event.update(cursor=receipt[0], offered_at=receipt[1], acknowledged_at=receipt[2],
+                         stage='acknowledged' if receipt[2] is not None else 'offered')
+            other = db.execute('''SELECT 1 FROM native_delivery_receipts r
+                JOIN native_tracking_events e ON e.event_id=r.event_id
+                WHERE r.wire_hash=? AND e.episode_id!=? LIMIT 1''', (receipt[3], ident)).fetchone()
+            match.update(wire_hash=receipt[3], wire_guid_hash=receipt[4], wire_unique=other is None,
+                         wire_timestamp=receipt[5], wire_position=receipt[6], wire_total=receipt[7])
+        if event['acknowledged_at'] is None and db.execute(
+                'SELECT 1 FROM seen WHERE hash=?', ('native:' + event_id,)).fetchone():
+            # An older binary may have confirmed this event before the
+            # upgrade or during a rollback. Only the fact is known.
+            event['stage'] = 'acknowledged'
+        elif not receipt:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_outbox'").fetchone():
+                reason = db.execute('SELECT reason FROM native_outbox WHERE event_id=?', (event_id,)).fetchone()
+                if reason and reason[0]:
+                    event.update(stage='blocked', reason=reason[0])
+            elif event_id in (_state(db, 'native_blocked') or []):
                 event['stage'] = 'blocked'
-        return dict(state='ok', episode_id=ident, title=snapshot.get('title'), show=snapshot.get('show'),
-                    source=source, event=event, target={'state': 'unverified'}, delivery_match=match)
-    return _read(db_path, upstream, username, user_id, select)
+    return dict(state='ok', episode_id=ident, title=snapshot.get('title'), show=snapshot.get('show'),
+                source=source, event=event, target={'state': 'unverified'}, delivery_match=match)
