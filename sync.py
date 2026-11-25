@@ -19,12 +19,12 @@ import requests
 
 from abs_client import ABSClient
 from bo_client import BOClient
-from core import decide
 from mapping import build_mapping, bo_to_canonical, canonical_to_bo, validate_native_readalong
 from revision import mapping_fingerprint, mapping_identity_fingerprint, reconcile_manifest_revision
 from discovery import discover
 import native_discovery
 import bookorbit_scope
+import bookstart_review
 
 UTC = dt.timezone.utc
 
@@ -49,6 +49,21 @@ def numeric(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         raise ValueError('invalid nonnegative position')
     return float(value)
+
+
+class AutomaticCompletion(RuntimeError):
+    pass
+
+
+def validate_bo_audio_goal(bo, mapping, goal):
+    threshold = bo.library(mapping['bo_library_id']).get('markAsFinishedPercentComplete')
+    threshold = 98 if threshold is None else numeric(threshold)
+    asset,local = canonical_to_bo(mapping,goal['position'])
+    track = next(t for t in mapping['bo_tracks'] if t['id']==asset)
+    total = mapping['bo_tracks'][-1]['start']+mapping['bo_tracks'][-1]['duration']
+    percentage = (track['start']+local/1000)/total*100
+    if goal['status']!='finished' and percentage >= threshold:
+        raise AutomaticCompletion('BookOrbit wuerde diesen noch nicht abgeschlossenen Titel automatisch abschliessen')
 
 
 def normalize_abs(raw, mapping):
@@ -874,15 +889,7 @@ class Bridge:
             if abs_finish is None:
                 raise RuntimeError('Abschlussdatum fehlt; keine erfundene Abschlusszeit uebertragen')
         if source=='abs':
-            lib = self.bo.library(mapping['bo_library_id'])
-            threshold = lib.get('markAsFinishedPercentComplete')
-            threshold = 98 if threshold is None else numeric(threshold)
-            asset,local = canonical_to_bo(mapping,goal['position'])
-            bt = next(t for t in mapping['bo_tracks'] if t['id']==asset)
-            total = mapping['bo_tracks'][-1]['start']+mapping['bo_tracks'][-1]['duration']
-            percentage = (bt['start']+local/1000)/total*100
-            if goal['status']!='finished' and percentage >= threshold:
-                raise RuntimeError('BookOrbit wuerde diesen noch nicht abgeschlossenen Titel automatisch abschliessen')
+            validate_bo_audio_goal(self.bo,mapping,goal)
             if baseline is None and pair[target]['status']=='finished' and goal['status']!='finished':
                 raise RuntimeError('Erstbestand darf kein erneutes Hoeren ausloesen')
         self.guard()
@@ -1028,11 +1035,10 @@ class Bridge:
                         else: result[jf_action] += 1
                         continue
                     result['jellyfin_audio']['awaiting_index'].append(mapping['title'])
-                first_agreement = bookorbit_scope.initial_agreement(self, 'audio:'+id, pair, equal)
-                decision=decide(pair['abs'],pair['bo'],stored.get('baseline'))
-                action=decision['action']
-                if action=='conflict':
-                    raise RuntimeError(decision['reason'])
+                previous = stored.get('baseline')
+                chosen, first_agreement = bookstart_review.source(
+                    self,'audio:'+id,pair,previous,equal,lambda: bookstart_review.audio_decision(pair, previous))
+                action = {None:'baseline','bo':'bo_to_abs','abs':'abs_to_bo'}[chosen]
                 if action=='baseline':
                     result['unchanged']+=1
                     if apply:
@@ -1062,7 +1068,10 @@ class Bridge:
             except Exception as exc:
                 # Client exceptions contain only sanitized method/path/status; no body or credentials.
                 error=str(exc) if isinstance(exc,(RuntimeError,ValueError)) or type(exc).__name__=='RequestError' else type(exc).__name__
-                issue={'title':mapping['title'],'reason':error};result['blocked'].append(issue)
+                issue={'title':mapping['title'],'reason':error}
+                if isinstance(exc, bookstart_review.InitialConflict):
+                    issue.update(initial_review=True, abs_id=id)
+                result['blocked'].append(issue)
                 if apply and stored.get('last_error')!=error:
                     stored['last_error']=error;self.save(id,stored)
                     self.event(id,'blocked',issue)

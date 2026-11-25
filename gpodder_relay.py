@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 import requests
+from tracking_delivery import ensure_delivery_schema, record_batch
 
 LIMIT = 32 * 1024 * 1024
 
@@ -70,9 +71,14 @@ class Relay:
             if old is None:
                 self.set(db, 'scope', scope); self.set(db, 'ack', baseline)
                 self.set(db, 'pending', None)
+            self.set(db, 'delivery_mode', 'native-state' if config.get('native_source') is not None else 'legacy-actions')
             if config.get('native_source') is not None:
                 from tracking_projection import NativeProjection
                 NativeProjection.ensure_schema(db)
+                ensure_delivery_schema(db)
+                pending = self.get(db, 'pending')
+                if pending:
+                    record_batch(db, pending, offered_at=self.get(db, 'last_poll'))
                 db.execute('CREATE TABLE IF NOT EXISTS native_tracking_superseded '
                            '(event_id TEXT PRIMARY KEY, successor TEXT NOT NULL)')
                 native = config['native_source']
@@ -131,20 +137,22 @@ class Relay:
             ack, pending = self.get(db, 'ack'), self.get(db, 'pending')
             if since is not None and (type(since) is not int or since < 0):
                 raise ValueError('invalid_cursor')
+            if self.native_source is not None and device and device != 'books-audio-native':
+                raise ValueError('native_tracking_device_filter_unsupported')
             # Only a cursor we actually issued can acknowledge a previous batch.
             if pending and since == pending['timestamp']:
+                if self.native_source is not None:
+                    record_batch(db, pending, acknowledged_at=int(self.clock()))
                 for fingerprint in pending['fingerprints']:
                     db.execute('INSERT OR IGNORE INTO seen VALUES(?)', (fingerprint,))
                 ack = pending['timestamp']; self.set(db, 'ack', ack)
                 pending = None; self.set(db, 'pending', None)
                 db.commit()  # Keep acknowledgement if the next upstream poll fails.
-            elif since is not None and since > ack and (not pending or since > pending['timestamp']):
+            elif since is not None and since > ack:
                 raise ValueError('unknown_cursor')
             if pending:
                 return {'actions': pending['actions'], 'timestamp': pending['timestamp']}
             if self.native_source is not None:
-                if device and device != 'books-audio-native':
-                    raise ValueError('native_tracking_device_filter_unsupported')
                 return self.native_actions(db, ack, authorization)
             params = {'since': max(self.config['baseline'], ack - 1), 'aggregated': 'false'}
             if device: params['device'] = device
@@ -194,8 +202,15 @@ class Relay:
         from tracking_projection import NativeProjection
         snapshots = self.native_source.capture(authorization)
         now = int(self.clock())
+        # Publish a coherent local source snapshot before any outbound RSS
+        # calls. A failed response can leave a ready event, never a receipt.
+        db.execute('BEGIN')
+        scan_number = (self.get(db, 'native_inventory_scan') or 0) + 1
         NativeProjection.update(db, snapshots, now,
-            recovery_ids=self.config.get('native_source', {}).get('recovery_ids', ()))
+            recovery_ids=self.config.get('native_source', {}).get('recovery_ids', ()),
+            scan_number=scan_number)
+        self.set(db, 'native_inventory_scan', scan_number)
+        db.commit()
         if hasattr(self.resolver, 'begin_poll'): self.resolver.begin_poll()
         output, fingerprints, blocked = [], [], []
         current = {row['id']: row for row in snapshots}
@@ -237,9 +252,11 @@ class Relay:
             item = {key: value for key, value in item.items() if not key.startswith('_tracking_')}
             output.append(item); fingerprints.append(fingerprint)
         cursor = max(now, ack + 1)
-        self.set(db, 'pending', dict(actions=output, timestamp=cursor, fingerprints=fingerprints))
+        pending = dict(actions=output, timestamp=cursor, fingerprints=fingerprints)
+        record_batch(db, pending, offered_at=now)
+        self.set(db, 'pending', pending)
         self.set(db, 'last_poll', now)
-        self.set(db, 'native_scan', dict(at=now, episodes=len(snapshots),
+        self.set(db, 'native_scan', dict(at=now, scan_number=scan_number, episodes=len(snapshots),
             source=getattr(self.native_source, 'last_status', {}), blocked=len(blocked)))
         self.set(db, 'native_blocked', blocked)
         return {'actions': output, 'timestamp': cursor}

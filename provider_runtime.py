@@ -13,6 +13,7 @@ import json
 import math
 from pathlib import PurePosixPath
 import uuid
+import bookstart_review
 
 from core import validate_tracks
 from folder_manager import translate
@@ -120,6 +121,7 @@ def provider_preview(bridge):
 class BookBridgeCoordinator:
     def __init__(self, bridge):
         self.b, self.jf = bridge, bridge.jellyfin
+        self.verify_sources = False
 
     def mappings(self):
         pairs = self.b.bookbridge.inventory()
@@ -139,8 +141,10 @@ class BookBridgeCoordinator:
         return mappings, unsupported
 
     def verify_mapping(self, expected):
-        pairs = [p for p in self.b.bookbridge.inventory() if p.get('id') == expected['bb_id']]
-        if len(pairs) != 1: raise ValueError('BookBridge mapping disappeared or became ambiguous')
+        pairs = [p for p in self.b.bookbridge.inventory()
+                 if p.get('id') == expected['bb_id'] or p.get('abs_id') == expected['abs_id']]
+        if len(pairs) != 1 or pairs[0].get('id') != expected['bb_id']:
+            raise ValueError('BookBridge mapping disappeared or became ambiguous')
         current = build_audio_mapping(pairs[0], self.b.abs.item(expected['abs_id']), self.b.config)
         if current['fingerprint'] != expected['fingerprint']: raise ValueError('BookBridge audiobook identity changed')
 
@@ -149,11 +153,13 @@ class BookBridgeCoordinator:
         raw = self.b.abs.progress(mapping['abs_id'])
         if raw is not None and raw.get('libraryItemId') != mapping['abs_id']:
             raise ValueError('ABS returned another audiobook progress record')
-        rows = user_data(self.jf.items(ids=[t['id'] for t in tracks], types='AudioBook'), tracks)
+        rows = user_data(self.jf.items(ids=[t['id'] for t in tracks], types='AudioBook'), tracks,
+                         verify_sources=self.verify_sources)
         states = dict(abs=normalize_abs(raw, mapping), jf=normalize(rows, tracks, previous))
         return states, dict(abs=raw, jf=rows)
 
-    def handle(self, mapping, tracks, apply, settle):
+    def handle(self, mapping, tracks, apply, settle, *, review=None):
+        self.verify_sources = review is not None
         b, ident = self.b, mapping['abs_id']
         key = '_bookbridge_audio:' + ident
         stored = b.load(key)
@@ -169,7 +175,10 @@ class BookBridgeCoordinator:
                     b.save(key, dict(baseline=states, raw=raw['jf']))
                 return 'unchanged'
             raise RuntimeError('Interrupted BookBridge audio transfer requires journal review')
-        source = choose(states, stored.get('baseline'))
+        previous = stored.get('baseline')
+        source, _ = bookstart_review.source(b,key,states,previous,same,lambda: choose(states,previous),
+            review=review,evidence=[mapping,tracks,raw],
+            restrictions=lambda: bookstart_review.audio_restrictions(b,mapping,states,raw,raw['jf']))
         if source is None:
             if apply: b.save(key, dict(baseline=states, raw=raw['jf']))
             return 'unchanged'
@@ -272,6 +281,8 @@ class BookBridgeCoordinator:
             except Exception as exc:
                 reason = str(exc) if isinstance(exc, (RuntimeError, ValueError)) or type(exc).__name__ == 'RequestError' else type(exc).__name__
                 issue = dict(title=mapping['title'], abs_id=mapping['abs_id'], reason=reason)
+                if isinstance(exc, bookstart_review.InitialConflict):
+                    issue['initial_review'] = True
                 result['blocked'].append(issue)
                 key = '_bookbridge_error:' + mapping['abs_id']
                 if apply and b.load(key).get('reason') != reason:

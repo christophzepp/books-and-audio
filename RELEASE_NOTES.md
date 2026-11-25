@@ -1,3 +1,9 @@
+## 0.1.0-beta.17 – Zustellung an Floppy und Anfangsstände
+
+- In der Podcastliste zeigt die Zustellhistorie den zuletzt beobachteten PinePods-Stand und den letzten Übergabeschritt an Floppy. Die Suche umfasst auch Folgen ohne lokalen Download.
+- Ein optionaler, kontogebundener Leseabgleich kann den passenden Hörvorgang in Floppy bestätigen. Die GUI nennt den Zeitpunkt der Prüfung. Alte Importstände bleiben beim Update erhalten.
+- Bei abweichenden ersten Buch- oder Hörbuchpositionen zeigt die GUI die Werte der beteiligten Dienste und die Übertragungsrichtung. Der Worker liest die Stände vor der Übernahme erneut. Wer zwischenzeitlich weiterliest, erhält eine neue Vorschau.
+
 ## 0.1.0-beta.16 – Medienzugriffe und Bibliothekspflege
 
 - Der Worker merkt sich unveränderte strukturelle Zuordnungskonflikte. Auch der Hörspiel-Organizer stellt wiederkehrende Listenarr-Zielkonflikte zurück. Geänderte Katalogdaten, eine manuelle Prüfung und das Wartungsfenster ermöglichen den nächsten Versuch.

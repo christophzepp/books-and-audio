@@ -141,6 +141,19 @@ if not result.wasSuccessful():
         result = subprocess.run([sys.executable, '-c', child], cwd=Path(__file__).parent,
                                 capture_output=True, text=True, timeout=30, check=True)
         self.assertEqual(result.stderr,'')
+    def test_delivery_queries_authentication_and_encoded_titles(self):
+        endpoint = '/api/podcast-delivery/search'
+        self.assertEqual(self.request('GET', endpoint+'?q=H%C3%B6ren&offset=0')[0], 401)
+        self.bootstrap()
+        code, body, *_ = self.request('GET', endpoint+'?q=H%C3%B6ren&offset=0')
+        self.assertEqual((code, json.loads(body)), (200, {'state':'scope_mismatch'}))
+        for query in ['?q=x&q=y', '?q=%zz', '?q=%FF', '?q=%00', '?offset=1000001']:
+            with self.subTest(query=query):
+                self.assertEqual(self.request('GET', endpoint+query)[0], 400)
+        self.assertEqual(self.request('GET','/api/podcast-delivery?native_id=2%3A10%3A20')[0], 200)
+        self.assertEqual(self.request('GET','/api/podcast-delivery?native_id=abc')[0], 400)
+        self.assertEqual(self.request('GET','/api/status?offset=0')[0], 404)
+
     def test_private_api_requires_login(self):
         for path in ['/api/status','/api/connections','/api/events','/api/commands/'+ID]: self.assertEqual(self.request('GET',path)[0],401)
     def test_queued_response_never_echoes_input(self):

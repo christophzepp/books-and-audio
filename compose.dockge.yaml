@@ -36,6 +36,9 @@ services:
       - web_key:/keys:ro
       - web:/admin-state
       - control:/admin-state/control
+      # Optional bei installiertem Tracking-Stack. Den tatsächlichen NVMe-Pfad verwenden.
+      # - /opt/stacks/books-audio-tracking/tracking/state:/tracking-readonly:ro
+      # - ./floppy-proof:/tracking-proof:ro
     healthcheck:
       test: [CMD, python, admin_web.py, --health]
       interval: 15s

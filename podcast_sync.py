@@ -1168,6 +1168,8 @@ class PodcastCoordinator:
         for key in result['pine_metadata_orphaned']:
             result['blocked'].append(dict(id=key, title='Podcast metadata correction',
                 reason='An unavailable podcast episode has an unresolved PinePods metadata correction'))
+        delivery_keys = {m['id']: fingerprint([m['feed_url'], m['enclosure_url']]) for m in mappings
+                         if all(isinstance(m.get(key), str) and m[key] for key in ('feed_url', 'enclosure_url'))}
         for index,mapping in enumerate(mappings):
             if getattr(self.b,"serve_preview",None):self.b.serve_preview()
             row = dict(id=mapping['id'], title=mapping['title'], show=mapping['show'], duration=mapping['duration'],
@@ -1233,6 +1235,9 @@ class PodcastCoordinator:
             self.pine_row(mapping, row)
             conflicts.record(mapping, row)
             result['episodes'].append(row)
+        for episode in result['episodes']:
+            if episode['id'] in delivery_keys:
+                episode['delivery_lookup'] = delivery_keys[episode['id']]
         for status in ('waiting','enrolled','joining','blocked'):
             result['pine_'+status] = sum(row.get('pine_status') == status for row in result['episodes'])
         result['file_checks_pending'] = file_checks.pending_count

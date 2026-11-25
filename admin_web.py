@@ -312,7 +312,8 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
     def handle_api(self):
         host = self.host()
         parsed = urlsplit(self.path)
-        if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or "%" in self.path:
+        delivery_route = self.command == "GET" and parsed.path in {"/api/podcast-delivery", "/api/podcast-delivery/search"}
+        if parsed.scheme or parsed.netloc or parsed.fragment or "%" in parsed.path or (parsed.query and not delivery_route):
             raise WebError(404, "Die Seite wurde nicht gefunden.")
         path = parsed.path
         if self.command == "GET" and path == "/health":
@@ -332,6 +333,14 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             return self.respond(200, (self.server.static / filename).read_bytes(), content_type=content_type)
         if self.command == "GET":
             self.require_session(session)
+            if delivery_route:
+                import admin_delivery
+                search = path.endswith("/search")
+                try:
+                    args = admin_delivery.parameters(parsed.query, search=search)
+                except ValueError:
+                    raise WebError(400, "Ungültige Anfrage zur Podcast-Zustellung.") from None
+                return self.respond(200, admin_delivery.report(self.server.store, args, search=search))
             getters = {"/api/status": self.server.store.status, "/api/connections": self.server.store.list_connections, "/api/folders": self.server.store.list_folders, "/api/events": self.server.store.events}
             activity = re.fullmatch(r"/api/media-activity/(1|7)(?:/([0-9]{1,11})-([1-9][0-9]{0,17}))?", path)
             if activity:
@@ -365,6 +374,10 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             if set(payload) != {"kind", "payload"} or payload["kind"] not in KINDS or not isinstance(payload["payload"], dict):
                 raise WebError(400, "Dieser Auftrag ist nicht gültig.")
             data = payload["payload"]
+            if payload["kind"].startswith("bookstart."):
+                from bookstart_review import valid
+                if not valid(payload["kind"], data):
+                    raise WebError(400, "Bitte eine gültige Ausgabe und ihren Ausgangsstand wählen.")
             if payload["kind"] == "conflict.retry":
                 from structural_conflicts import valid_retry
                 if not valid_retry(data):

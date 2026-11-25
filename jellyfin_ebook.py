@@ -5,7 +5,8 @@ import hashlib
 import math
 from pathlib import Path
 import uuid
-from bookorbit_scope import baseline_needed, initial_agreement, mark_agreement
+from bookorbit_scope import baseline_needed, mark_agreement
+import bookstart_review
 from datetime import datetime, timezone
 from epub_index_cache import EpubIndexCache, verified_bytes
 from jellyfin_audio import choose, same, encode
@@ -129,7 +130,7 @@ class EbookCoordinator:
             self.b._ebook_index_cache=cache
         return cache
 
-    def handle(self,m,apply,settle,*,force_media=False):
+    def handle(self,m,apply,settle,*,force_media=False,review=None):
         b=self.b;key='_jellyfin_ebook:'+str(m['file_id'])
         config = getattr(b, 'config', {})
         self.logical_guard()
@@ -145,7 +146,7 @@ class EbookCoordinator:
                   and not integrity_due(config,current_time,proof['verified_at']))
         fingerprint=m['sha256']+':'+str(m['file_id'])+':'+m['jf_id']
         baseline=stored.get('baseline') or {}
-        if (reusable and not stored.get('pending') and not baseline_needed(b,key) and set(baseline)=={'bo','jf'}
+        if (review is None and reusable and not stored.get('pending') and not baseline_needed(b,key) and set(baseline)=={'bo','jf'}
                 and all(isinstance(row,dict) and row.get('fingerprint')==fingerprint for row in baseline.values())
                 and checkpoint.get('schema') in (1,2) and checkpoint.get('binding')==binding
                 and checkpoint.get('raw_sha256')==hashlib.sha256(encode(raw).encode()).hexdigest()):
@@ -202,8 +203,21 @@ class EbookCoordinator:
                 if apply:b.save(key,confirmed_state(pair,raw))
                 return 'unchanged'
             raise RuntimeError('Interrupted EPUB transfer requires journal review')
-        first_agreement = initial_agreement(b, key, pair, same)
-        source=choose(pair,stored.get('baseline'))
+        def premature_finish(pct):
+            threshold = b.bo.library(m['bo_library_id']).get('markAsFinishedPercentComplete')
+            return pct >= (98 if threshold is None else threshold)
+        def restrictions():
+            if pair['jf']['status'] == 'in_progress' and premature_finish(e.index_to_bo(round(pair['jf']['position']/10))[1]):
+                return {'jf':'BookOrbit würde diesen Lesestand automatisch als abgeschlossen markieren.'}
+            if pair['jf']['status'] == 'finished' and pair['bo']['status'] != 'finished':
+                try:
+                    datetime.fromisoformat(raw['jf']['LastPlayedDate'].replace('Z','+00:00'))
+                except (AttributeError,KeyError,ValueError):
+                    return {'jf':'Jellyfin liefert kein gültiges Abschlussdatum.'}
+            return {}
+        source, first_agreement = bookstart_review.source(b,key,pair,stored.get('baseline'),same,
+            lambda: choose(pair,stored.get('baseline')),review=review,evidence=[m,binding,raw],total=e.total,
+            restrictions=restrictions)
         if source is None:
             if apply:
                 b.save(key, confirmed_state(pair,raw))
@@ -219,9 +233,13 @@ class EbookCoordinator:
         if batch is not None:batch.invalidate()
         goal=pair[source];index=round(goal['position']/10);point,pct=e.index_to_bo(index)
         if goal['status']=='finished':pct=100
-        if source=='jf' and goal['status']!='finished':
-            lib=b.bo.library(m['bo_library_id']);threshold=lib.get('markAsFinishedPercentComplete')
-            if pct>=(98 if threshold is None else threshold):raise ValueError('BookOrbit would prematurely mark EPUB finished')
+        if source=='jf' and goal['status']!='finished' and premature_finish(pct):
+            raise ValueError('BookOrbit would prematurely mark EPUB finished')
+        if source == 'jf' and goal['status'] == 'finished' and pair['bo']['status'] != 'finished':
+            date = raw['jf'].get('LastPlayedDate')
+            if not date:
+                raise RuntimeError('Jellyfin EPUB completion date missing')
+            datetime.fromisoformat(date.replace('Z','+00:00'))
         def unchanged():
             _,fresh=current()
             if encode(fresh)!=encode(raw):raise RuntimeError('Concurrent EPUB progress change')
@@ -253,12 +271,15 @@ class EbookCoordinator:
                     finished=datetime.fromisoformat(date.replace('Z','+00:00')).date().isoformat()
                 b.bo.write_status(m['bo_id'],'read' if goal['status']=='finished' else 'reading',started_at=previous.get('startedAt'),finished_at=finished)
             final,fr=current()
+            if fr['jf'] != raw['jf']:raise RuntimeError('Jellyfin changed during EPUB transfer')
         if not all(same(v,goal) for v in final.values()):raise RuntimeError('EPUB transfer not confirmed')
         # Progress-only transfers retain the original historical physical time.
         # Hidden external byte edits are detected on a source-version change,
         # an explicit physical check, or an opted-in integrity audit.
         record.update(stage='complete',after=fr);b.write_record(record['id'],key,record,'complete')
         b.save(key,confirmed_state(final,fr))
+        if review and first_agreement:
+            mark_agreement(b,key)
         b.event(key,'ebook_synced',dict(title=m['title'],source=source,location=index,status=goal['status']))
         return 'synced'
 
@@ -274,7 +295,10 @@ class EbookCoordinator:
                 if apply:self.b.save('_jellyfin_ebook_error:'+str(m['file_id']),{})
             except Exception as exc:
                 reason=str(exc) if isinstance(exc,(RuntimeError,ValueError)) or type(exc).__name__=='RequestError' else type(exc).__name__
-                r['blocked'].append(dict(title=m['title'],reason=reason))
+                issue=dict(title=m['title'],reason=reason)
+                if isinstance(exc, bookstart_review.InitialConflict):
+                    issue.update(initial_review=True, file_id=m['file_id'])
+                r['blocked'].append(issue)
                 error_key='_jellyfin_ebook_error:'+str(m['file_id'])
                 if apply and self.b.load(error_key).get('reason')!=reason:
                     self.b.alert(error_key,'E-Book-Sync zurueckgestellt: '+m['title']+' — '+reason)

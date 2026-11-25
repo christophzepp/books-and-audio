@@ -1,6 +1,8 @@
 # Books & Audio
 
-**Öffentliche Beta · v0.1.0-beta.16**
+**Öffentliche Beta · v0.1.0-beta.17**
+
+Unter **Podcasts** kannst du für eine Folge den zuletzt beobachteten PinePods-Stand, die Bereitstellung über gPodder und die Abrufbestätigung nachsehen. Mit dem optionalen [Floppy-Lesebeleg](TRACKING.md#floppy-lesebeleg) zeigt die GUI auch den im Ziel gespeicherten Hörstand. Bei abweichenden Anfangsständen öffnet **Anfangsstand auswählen** die Positionsvorschau für den jeweiligen Titel.
 
 Unter **Medienzugriffe** findest du Uhrzeit, Titel und Anlass der Prüfungen der letzten 24 Stunden oder sieben Tage. Die Buch- und Hörbuchseiten bieten eine Vorschau zur Bereinigung fehlender Zuordnungen.
 

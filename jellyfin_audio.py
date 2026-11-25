@@ -72,7 +72,7 @@ def bind(mapping, inventory, folder_config=None):
     return result
 
 
-def user_data(items, tracks):
+def user_data(items, tracks, *, verify_sources=False):
     index = {i['Id']: i for i in items}
     if set(index) != {t['id'] for t in tracks}: raise ValueError('Incomplete audiobook progress')
     result = []
@@ -80,6 +80,10 @@ def user_data(items, tracks):
         i = index[t['id']]
         if i.get('Path') != t['path'] or i.get('Type') != 'AudioBook' or abs(i.get('RunTimeTicks', 0)/TICKS-t['duration']) > 1:
             raise ValueError('Audiobook identity changed')
+        if verify_sources:
+            sizes = [s.get('Size') for s in i.get('MediaSources',[]) if s.get('Path') == t['path']]
+            if sizes != [t['size']]:
+                raise ValueError('Jellyfin audiobook file changed during review')
         d = i['UserData']
         tick = d.get('PlaybackPositionTicks')
         if type(tick) is not int or tick < 0 or tick/TICKS > t['duration']+1 or type(d.get('Played')) is not bool:
@@ -132,11 +136,14 @@ class AudioCoordinator:
     def __init__(self, bridge, client):
         self.b, self.jf = bridge, client
         self.inventory = None
+        self.verify_sources = False
 
     def read(self, tracks):
-        return user_data(self.jf.items(ids=[x['id'] for x in tracks], types='AudioBook'), tracks)
+        return user_data(self.jf.items(ids=[x['id'] for x in tracks], types='AudioBook'), tracks,
+                         verify_sources=self.verify_sources)
 
-    def handle(self, mapping, pair, raw, apply, settle):
+    def handle(self, mapping, pair, raw, apply, settle, *, review=None):
+        self.verify_sources = review is not None
         b, id = self.b, mapping['abs_id']; key = '_jellyfin_audio:' + id
         from contextlib import nullcontext
         batch=getattr(b,'_book_observations',None)
@@ -164,9 +171,11 @@ class AudioCoordinator:
                     b.save(key, dict(baseline=states,raw=rows)); b.save(id, {'baseline': pair})
                 return 'unchanged'
             raise RuntimeError('Interrupted Jellyfin transfer requires journal review')
-        from bookorbit_scope import initial_agreement, mark_agreement
-        first_agreement = initial_agreement(b, 'audio-jf:'+id, states, same)
-        source = choose(states, baseline)
+        from bookorbit_scope import mark_agreement
+        import bookstart_review
+        source, first_agreement = bookstart_review.source(b, 'audio-jf:'+id, states, baseline, same,
+            lambda: choose(states,baseline), review=review, evidence=[mapping,tracks,raw,rows],
+            restrictions=lambda: bookstart_review.audio_restrictions(b,mapping,states,raw,rows))
         if source is None:
             if apply:
                 b.save(key, dict(baseline=states, raw=rows))
@@ -188,6 +197,9 @@ class AudioCoordinator:
         if encode(fresh) != encode(raw) or encode(self.read(tracks)) != encode(rows):
             raise RuntimeError('Progress changed before Jellyfin transfer')
         goal = states[source]
+        if review and source in ('jf','abs') and not same(pair['bo'], goal):
+            from sync import validate_bo_audio_goal
+            validate_bo_audio_goal(b.bo,mapping,goal)
         finished = None
         if source == 'jf' and goal['status']=='finished':
             dates=[d['LastPlayedDate'] for d in rows if d.get('LastPlayedDate')]
@@ -204,34 +216,38 @@ class AudioCoordinator:
         if source == 'jf':
             total = mapping['abs_tracks'][-1]['start']+mapping['abs_tracks'][-1]['duration']
             latest = raw
-            def abs_step(label, fn):
+            def abs_step(label, fn, position, statuses):
                 nonlocal latest
                 checkpoint('sending_abs_'+label)
                 b.guard(); jf_unchanged()
                 _, current = b.read_pair(mapping)
                 if encode(current) != encode(latest): raise RuntimeError('Concurrent ABS/BookOrbit edit')
                 fn()
-                _, latest = b.read_pair(mapping)
+                observed, latest = b.read_pair(mapping)
                 if latest['bo'] != raw['bo'] or latest['bo_status'] != raw['bo_status']: raise RuntimeError('Concurrent BookOrbit edit')
+                jf_unchanged()
+                if (abs(observed['abs']['position'] - position) > 1 or observed['abs']['status'] not in statuses):
+                    raise RuntimeError('ABS transfer step not confirmed')
             if pair['abs']['status']=='finished' and goal['status']!='finished':
-                abs_step('reopen',lambda:b.abs.write_finished(id,False))
+                abs_step('reopen',lambda:b.abs.write_finished(id,False),0,{'in_progress'})
             if not same(pair['abs'],goal):
-                abs_step('position',lambda:b.abs.write_position(id,goal['position'],total))
+                abs_step('position',lambda:b.abs.write_position(id,goal['position'],total),goal['position'],{'in_progress'})
                 if goal['status']=='finished':
-                    abs_step('finish',lambda:b.abs.write_finished(id,True,finished_at=finished))
+                    abs_step('finish',lambda:b.abs.write_finished(id,True,finished_at=finished),goal['position'],{'finished'})
             pair,raw=b.read_pair(mapping)
+            if encode(raw) != encode(latest): raise RuntimeError('Concurrent ABS/BookOrbit edit')
             if not same(pair['abs'],goal): raise RuntimeError('ABS transfer not confirmed')
         direction = 'bo_to_abs' if source == 'bo' else 'abs_to_bo'
         if not same(pair['abs'],pair['bo']):
             checkpoint('synchronizing_abs_bo')
             b.external_write_guard=jf_unchanged
-            try: pair=b.apply(mapping,pair,raw,direction,(baseline or {}).get('abs') and baseline)
+            try: pair=b.apply(mapping,pair,raw,direction,states if review else (baseline or {}).get('abs') and baseline)
             finally: b.external_write_guard=None
         pair, raw = b.read_pair(mapping)
         if not all(same(s,goal) for s in pair.values()): raise RuntimeError('ABS/BookOrbit goal not confirmed')
         date_ms=(raw.get('abs') or {}).get('finishedAt' if goal['status']=='finished' else 'lastUpdate')
         date=datetime.fromtimestamp(date_ms/1000,timezone.utc).isoformat() if date_ms else None
-        target=desired(rows,tracks,goal,date)
+        target = rows if review and same(states['jf'],goal) else desired(rows,tracks,goal,date)
         for i,(before,after) in enumerate(zip(rows,target)):
             changes={k:v for k,v in after.items() if v!=before.get(k) and v is not None}
             if not changes: continue
@@ -251,5 +267,7 @@ class AudioCoordinator:
         record['stage']='complete'; record['after']=finalraw; record['jellyfin_after']=rows
         b.write_record(record['id'],key,record,'complete')
         b.save(key,dict(baseline=final,raw=rows)); b.save(id,{'baseline':finalpair})
+        if review and first_agreement:
+            mark_agreement(b, 'audio-jf:'+id)
         b.event(id,'jellyfin_synced',dict(title=mapping['title'],source=source,seconds=round(goal['position'],3),status=goal['status']))
         return 'synced'

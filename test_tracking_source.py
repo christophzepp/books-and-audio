@@ -53,6 +53,12 @@ class NativeSourceTests(unittest.TestCase):
         self.cfg=dict(upstream='http://pinepods:8040',username='reader',api_key_file=str(self.key),server_version='0.9.0')
         self.up=Upstream();self.source=NativeTrackingSource(self.cfg,request=self.up)
     def capture(self):return self.source.capture(AUTH)
+    def test_native_titles_are_optional_display_metadata(self):
+        self.up.pods[0]['podcastname'] = 'Ärzte im Gespräch'
+        self.up.rows[11][0]['Episodetitle'] = 'Zweite Folge'
+        row = self.capture()[0]
+        self.assertEqual((row['show'], row['title']), ('Ärzte im Gespräch', 'Zweite Folge'))
+        self.assertEqual(row['id'], '2:11:7')
     def test_native_completed_without_history_or_gpodder_action_is_retained(self):
         self.up.rows[11]=[episode(Completed=True)]
         self.assertEqual(self.capture(),[dict(id='2:11:7',podcast=FEED,episode=URL+'7',completed=True,position=0,total=600,published_at=action_epoch('2020-01-01T00:00:00'))])

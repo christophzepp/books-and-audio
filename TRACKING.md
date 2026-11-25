@@ -68,6 +68,24 @@ Der Dienst speichert Vergleichsbasis, ausstehende Antwort und bereits bestätigt
 
 `native_scan.at` und `native_scan.source` beschreiben die zuletzt erfolgreich gespeicherte native Quellprüfung; ihr Zeitpunkt muss mitgeprüft werden. `acknowledged` bestätigt den Transportcursor des Verbrauchers und ist **kein erneutes Auslesen der Floppy-Datenbank**. Offene beziehungsweise blockierte Ereignisse bleiben separat sichtbar. Ein erfolgreiches `/health` bestätigt nur, dass der Dienst antwortet. Die tatsächliche Übernahme in Floppy muss zusätzlich in dessen Oberfläche oder durch einen lesenden Datenvergleich geprüft werden.
 
+## Zustellung einer einzelnen Folge
+
+Ab Beta 17 lässt sich die Zustellung für eine einzelne Folge in der Podcastansicht
+von Books & Audio nachschlagen. Dafür braucht der Webdienst lesenden Zugriff auf
+das Zustandsverzeichnis des nativen Trackingdienstes. Die Titelsuche greift
+auch auf PinePods-Folgen zu, die Audiobookshelf nicht verwaltet. Bereits
+vorhandene Titel ohne gespeicherten Namen sind über ihre native Folgenkennung
+auffindbar. Die nächste reguläre Bestandsaufnahme ergänzt die verfügbaren Namen.
+
+Die Ansicht zeigt den zuletzt beobachteten Stand in PinePods, dessen verfügbare
+Aktivitätszeit und das daraus erzeugte gPodder-Ereignis. Für ein angebotenes
+Paket werden die konkrete Importposition und der Zeitpunkt der Bereitstellung
+gespeichert. Die Bestätigung erfolgt, wenn der Verbraucher genau diese
+Importposition zurücksendet. Bei früheren Betas ist für bereits bestätigte
+Ereignisse häufig nur die Bestätigung selbst belegt. Die Speicherung in Floppy
+erfordert einen zusätzlichen Beleg aus Floppy. Suchen und Öffnen der Spur lesen
+die Datenbank auf dem Zustandsvolume und lösen keinen erneuten Import aus.
+
 ## Unabhängige Updates über Dockge
 
 `compose.tracking.yaml` verwendet `ghcr.io/christophzepp/books-and-audio:tracking-beta`. Optional lässt sich der Wert mit `BOOKS_AUDIO_TRACKING_IMAGE` auf einen festen Versions-Tag setzen. Der Hauptstack verwendet weiterhin seinen Tag `beta`. Beide Tags verweisen bei Veröffentlichung auf dasselbe geprüfte Image für AMD64 und ARM64, lassen sich lokal aber unabhängig ziehen.
@@ -91,3 +109,22 @@ Der Sync-Worker speichert seine gPodder-Leseposition und die vollständige Aktio
 PinePods 0.9.0 filtert die Aktionen nach der Ereigniszeit des Clients. Eine spät hochgeladene Offline-Aktion kann vor der zuletzt gelesenen Sekunde liegen. Innerhalb der eingestellten Podcast-Wartungszeit überprüft der Worker deshalb je Durchlauf einen bereits bekannten Feed vollständig über die API. Ältere Prüfungen haben Vorrang. Bei einer zurückgesetzten Serverzeit oder einem abgeschnittenen Änderungspaket baut der Worker die betroffenen Feed-Nachweise aus vollständigen Antworten wieder auf. Vor einer Übertragung liest er die beteiligten Dienste weiterhin direkt. Floppy verwaltet seine Abrufe und Bestätigungen unabhängig davon.
 
 Zeigt die frische Prüfung vor einer Übertragung eine abweichende gPodder-Quittung, verwirft der Worker die betroffene Feed-Beobachtung. Der nächste Versuch lädt diesen Feed neu, auch nach einem Neustart. Eine Einzelantwort mit 25.000 Ereignissen kann in PinePods 0.9.0 abgeschnitten sein. Ein so großer kontoweiter Änderungsabruf löst die Prüfung je Feed aus. Erreicht ein einzelner Feed selbst diese Grenze, bleibt seine Übertragung gesperrt.
+
+### Floppy-Lesebeleg
+
+Die Weboberfläche liest die Zustellhistorie aus `/tracking-readonly/relay.sqlite`. Binde dazu im Webdienst das Zustandsverzeichnis des Tracking-Stacks unter `/tracking-readonly:ro` ein. Der Dienst vergleicht die Adresse und den Benutzernamen des aktiven PinePods-Profils mit dem Tracking-Konto. Nutzen beide Dienste verschiedene Adressen derselben Instanz, setze im Webdienst `TRACKING_PROFILE_ORIGIN` auf die geprüfte Adresse des Hauptdienstes und `TRACKING_RELAY_UPSTREAM` auf die entsprechende Adresse des Relays. Mit `TRACKING_PINE_USER_ID` lässt sich das native Konto zusätzlich festlegen.
+
+Für die unabhängige Bestätigung in der Floppy-Datenbank:
+
+1. Lege auf der NVMe ein privates Verzeichnis für die Ergebnisdatei an. Binde es im Webdienst als `/tracking-proof:ro` ein. Die UID des Webdienstes benötigt Leserechte.
+2. Setze im Webdienst `FLOPPY_EVIDENCE_USER` auf den Floppy-Benutzernamen und `FLOPPY_EVIDENCE_RELAY_URL` auf die im Floppy-Konto gespeicherte Relay-Adresse. Übernimm diese beiden Werte in den folgenden Aufruf.
+3. Führe das Hilfsprogramm auf dem Docker-Host mit der UID des Webdienstes aus. Beide Python-Dateien müssen aus derselben Beta stammen. Der Exporter liest den Floppy-Stand in einer schreibgeschützten Datenbanktransaktion und ersetzt die Ergebnisdatei erst nach vollständiger Prüfung.
+
+```sh
+python3 floppy_snapshot_host.py --web-container WEB --floppy-container FLOPPY \
+  --upstream https://pinepods.example --pine-user PINEPODS_BENUTZER \
+  --floppy-user FLOPPY_BENUTZER --relay-url http://books-audio-tracking:8791 \
+  --output /pfad/auf/nvme/floppy-proof/floppy.json
+```
+
+Setze für laufende Nachweise einen Host-Zeitplan, beispielsweise alle 30 Minuten. Nach drei Stunden gelten Belege als veraltet. Die Ergebnisdatei enthält gehashte Episodenschlüssel, Zustände und Zeitpunkte. Der Export schreibt keinen Hörverlauf und löst keinen Import aus. Ohne aktuellen, eindeutigen Treffer zeigt die GUI die nachweisbaren Transportschritte. Eine früher quittierte Lieferung kann auch nach dem Update ohne genaue Abrufzeit erscheinen.

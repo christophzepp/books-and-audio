@@ -134,7 +134,7 @@ class NativeTrackingSource:
                 if feed in seen_feeds:
                     raise ValueError()
                 seen_ids.add(ident); seen_feeds.add(feed)
-                normalized.append((ident, feed))
+                normalized.append((ident, feed, row.get('podcastname')))
             return sorted(normalized)
         except (KeyError, ValueError, TypeError, AttributeError):
             raise TrackingSourceError('native_feed_inventory_invalid') from None
@@ -174,7 +174,7 @@ class NativeTrackingSource:
 
     def _episodes(self, client, pods, stats):
         output, seen_global = [], set()
-        for podcast_id, feed in pods:
+        for podcast_id, feed, show in pods:
             seen_local, seen_urls = set(), set()
             for rows in self._pages(client, '/api/data/podcast_episodes', 'episodes',
                                     {'user_id': client._native_user_id, 'podcast_id': podcast_id}, stats):
@@ -225,10 +225,14 @@ class NativeTrackingSource:
                         # of the complete account inventory continue to sync.
                         stats['pending_invalid_progress'] += 1
                         continue
-                    output.append({'id': f'{client._native_user_id}:{podcast_id}:{episode_id}',
+                    snapshot = {'id': f'{client._native_user_id}:{podcast_id}:{episode_id}',
                                    'podcast': feed, 'episode': enclosure,
                                    'completed': row['Completed'], 'position': position,
-                                   'total': duration, 'published_at': published})
+                                   'total': duration, 'published_at': published}
+                    for field, label in (('title', row.get('Episodetitle')), ('show', show)):
+                        if isinstance(label, str) and label.strip():
+                            snapshot[field] = label.strip()[:512]
+                    output.append(snapshot)
         return output
 
     def _history(self, client, output, stats):
@@ -317,7 +321,7 @@ class NativeTrackingSource:
             stats['feeds'] = len(pods)
             output = self._episodes(client, pods, stats)
             self._history(client, output, stats)
-            if self._pods(client) != pods:
+            if [pod[:2] for pod in self._pods(client)] != [pod[:2] for pod in pods]:
                 raise TrackingSourceError('native_feed_scope_changed')
             output.sort(key=lambda row: row['id'])
             stats.update(ok=True, rows=len(output), user_id=user_id)

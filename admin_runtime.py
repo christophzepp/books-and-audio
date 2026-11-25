@@ -1,6 +1,7 @@
 """Execute authenticated administration requests between sync cycles."""
 from pathlib import Path
 from contextlib import closing
+import re
 import copy
 import hashlib
 import json
@@ -614,6 +615,9 @@ class Administration:
         try:
             if kind in ('bookorbit.preview_scope','bookorbit.approve_scope'):
                 bookorbit_scope.process(self,kind,payload,ident)
+            elif kind in ('bookstart.preview','bookstart.apply'):
+                import bookstart_review
+                bookstart_review.process(self,bridge,kind,payload,ident)
             elif kind in ('library.preview_missing','library.retire_missing'):
                 import library_cleanup
                 library_cleanup.process(self,bridge,kind,payload,ident)
@@ -761,24 +765,28 @@ class Administration:
             try:
                 for mapping in bridge.list_mappings():
                     ident, title = mapping['abs_id'], mapping['title']
-                    bad = next((x for x in issues if x.get('title') == title), None)
+                    bad = next((x for x in issues if x.get('abs_id',ident) == ident and x.get('title') == title), None)
                     pause = bridge.config.get('paused_mappings', {}).get(ident)
                     wait = next((x for x in last.get('native_readalong', []) if x.get('title') == title), None)
                     bb_mode = bridge.config.get('mapping_provider', 'bookorbit') == 'bookbridge'
                     state = bridge.load(('_bookbridge_audio:' if bb_mode else '') + ident).get('baseline', {}).get('abs', {})
                     rows.append({'id': ident, 'abs_id': ident, 'bo_id': mapping.get('bo_id'), 'bb_id': mapping.get('bb_id'), 'title': title,
                         'type': 'audiobook', 'can_review': not bb_mode,
+                        'initial_review': bool((bad or {}).get('initial_review') and not pause
+                                               and last.get('provider','bookorbit') == bridge.config.get('mapping_provider','bookorbit')),
                         'item_blocked': bool(bad or pause),
                         'has_readalong': bool(ident in bridge.config.get('native_readalong', {}) or bridge.db.execute('SELECT 1 FROM native_readalong_enrollments WHERE id=?', (ident,)).fetchone()),
                         'status': 'blocked' if bad else 'paused' if pause or paused else 'waiting' if wait else 'ok',
                         'reason': (bad or wait or {}).get('reason') or pause or disabled_reason or '',
                         'position': state.get('position'), 'progress_status': state.get('status')})
-                issues = [dict(x, abs_id=next((r['id'] for r in rows if r['title'] == x.get('title')), None)) for x in issues]
+                issues = [dict(x, abs_id=x.get('abs_id') or next((r['id'] for r in rows if r['title'] == x.get('title')), None)) for x in issues]
                 ebook_mappings = [] if bridge.config.get('mapping_provider') == 'bookbridge' else bridge.config.get('jellyfin', {}).get('ebooks', []) + bridge.load('_ebook_discovery').get('mappings', [])
                 for mapping in ebook_mappings:
-                    bad = next((x for x in last.get('ebooks', {}).get('blocked', []) if x.get('title') == mapping['title']), None)
+                    bad = next((x for x in last.get('ebooks', {}).get('blocked', [])
+                                if x.get('file_id',mapping['file_id']) == mapping['file_id'] and x.get('title') == mapping['title']), None)
                     rows.append({'id': 'ebook:' + str(mapping['file_id']), 'type': 'ebook',
                         'title': mapping['title'], 'bo_id': mapping['bo_id'], 'can_review': False,
+                        'initial_review': bool((bad or {}).get('initial_review')),
                         'status': 'blocked' if bad else 'paused' if paused else 'ok',
                         'reason': bad.get('reason') if bad else '', 'position_percent': None})
                 recent = []
@@ -898,6 +906,8 @@ def public_podcasts(value, config, paused):
     for row in value.get('episodes', []):
         if not isinstance(row, dict): continue
         item = {key: copy.deepcopy(row[key]) for key in allowed if key in row}
+        if isinstance(row.get('delivery_lookup'), str) and re.fullmatch('[a-f0-9]{64}', row['delivery_lookup']):
+            item['delivery_lookup'] = row['delivery_lookup']
         if row.get('can_retry_conflict') is True:
             item['can_retry_conflict'] = True
         # The coordinator names the playback state `status` and its cycle result

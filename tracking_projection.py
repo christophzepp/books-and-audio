@@ -19,11 +19,13 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
+from tracking_delivery import lookup_key
+
 
 _INITIALIZED = 'native-projection:initialized:v1'
 _DEVICE = 'books-audio-native'
 _MAX_EPOCH = 253_402_300_799
-_FIELDS = frozenset(('id', 'podcast', 'episode', 'guid', 'completed',
+_FIELDS = frozenset(('id', 'podcast', 'episode', 'guid', 'completed', 'title', 'show',
                      'position', 'total', 'updated_at', 'published_at'))
 
 
@@ -96,6 +98,9 @@ def _snapshot(row, observed_at):
     guid = row.get('guid')
     if guid is not None:
         result['guid'] = _text(guid)
+    for field in ('title', 'show'):
+        if isinstance(row.get(field), str) and row[field].strip():
+            result[field] = row[field].strip()[:512]
     result['updated_at'] = _optional_time(row.get('updated_at'), observed_at, activity=True)
     result['published_at'] = _optional_time(row.get('published_at'), observed_at)
     return result
@@ -117,7 +122,9 @@ class NativeProjection:
             snapshot TEXT NOT NULL,
             generation INTEGER NOT NULL,
             sequence INTEGER NOT NULL,
-            observed_at REAL NOT NULL
+            observed_at REAL NOT NULL,
+            lookup_hash TEXT,
+            scan_number INTEGER
         )''')
         db.execute('''CREATE TABLE IF NOT EXISTS native_tracking_events (
             event_id TEXT PRIMARY KEY,
@@ -133,7 +140,7 @@ class NativeProjection:
         )''')
 
     @staticmethod
-    def update(db, snapshots, observed_at, recovery_ids=()):
+    def update(db, snapshots, observed_at, recovery_ids=(), *, scan_number=None):
         """Persist a complete observation and return newly created play events.
 
         The first successful observation establishes the baseline, including an
@@ -246,11 +253,13 @@ class NativeProjection:
                          observed_at, _encoded(row), _encoded(payload)))
                     emitted.append(payload)
                 db.execute('''INSERT INTO native_tracking_episodes
-                    (id,snapshot,generation,sequence,observed_at) VALUES(?,?,?,?,?)
+                    (id,snapshot,generation,sequence,observed_at,lookup_hash,scan_number) VALUES(?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET snapshot=excluded.snapshot,
                     generation=excluded.generation,sequence=excluded.sequence,
-                    observed_at=excluded.observed_at''',
-                    (row['id'], _encoded(row), generation, sequence, observed_at))
+                    observed_at=excluded.observed_at,lookup_hash=excluded.lookup_hash,
+                    scan_number=excluded.scan_number''',
+                    (row['id'], _encoded(row), generation, sequence, observed_at,
+                     lookup_key(row['podcast'], row['episode']), scan_number))
 
             if not initialized:
                 audit = dict(inventory_count=len(rows), recovery_ids=sorted(recovered),
