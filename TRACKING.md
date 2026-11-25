@@ -118,7 +118,7 @@ Für die unabhängige Bestätigung in der Floppy-Datenbank:
 
 1. Lege auf der NVMe ein privates Verzeichnis für die Ergebnisdatei an. Binde es im Webdienst als `/tracking-proof:ro` ein. Die UID des Webdienstes benötigt Leserechte.
 2. Setze im Webdienst `FLOPPY_EVIDENCE_USER` auf den Floppy-Benutzernamen und `FLOPPY_EVIDENCE_RELAY_URL` auf die im Floppy-Konto gespeicherte Relay-Adresse. Übernimm diese beiden Werte in den folgenden Aufruf.
-3. Führe das Hilfsprogramm auf dem Docker-Host mit der UID des Webdienstes aus. Beide Python-Dateien müssen aus derselben Beta stammen. Der Exporter liest den Floppy-Stand in einer schreibgeschützten Datenbanktransaktion und ersetzt die Ergebnisdatei erst nach vollständiger Prüfung.
+3. Führe das Hilfsprogramm auf dem Docker-Host mit der UID des Webdienstes aus. Verwende dazu die Datei `floppy_snapshot_host.py` aus dem GitHub-Release. Sie liest den Exporter aus dem laufenden Books-&-Audio-Webcontainer. Im kurzlebigen Floppy-Prozess bleiben Wartungsjobs aus. Eine dort konfigurierte SQLite-Transaktion vom Typ `IMMEDIATE` beginnt für den Leseexport als `DEFERRED`. Der Exporter liest den Floppy-Stand in einer schreibgeschützten Transaktion. Der Helfer ersetzt die Ergebnisdatei erst nach vollständiger Prüfung.
 
 ```sh
 python3 floppy_snapshot_host.py --web-container WEB --floppy-container FLOPPY \
