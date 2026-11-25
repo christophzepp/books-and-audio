@@ -30,6 +30,16 @@ def options():
     return enabled, seconds
 
 
+def retry_signal(conflicts):
+    if not conflicts:
+        return None
+    from listenarr_conflicts import read
+    from maintenance_settings import podcast_window
+    config = read(SETTINGS.parent / 'maintenance-window.json')
+    active, day = podcast_window(config, time.time())
+    return (read(SETTINGS.parent / 'listenarr-retries.json'), day if active else None)
+
+
 def run(archive, apply):
     result = dict(status='completed', moved=0, skipped=0, conflicts=0, empty_dirs_removed=0)
     errors = []
@@ -70,6 +80,13 @@ def run(archive, apply):
                                 except (OSError, KeyError, RuntimeError) as error:
                                     errors.append(job['source'] + ': ' + type(error).__name__)
                                     continue
+                            from media_activity import record
+                            if pending_cleanup:
+                                parts = publication[0].get('target')
+                                target = parts[-1] if isinstance(parts, list) and parts else ''
+                            else:
+                                target = str(resolved[1] if is_arr_event else job.get('target', '')).rsplit('/', 1)[-1]
+                            record('series', target or job.get('source'), 'series_import')
                             if root is None:
                                 try:
                                     root = os.open(os.environ.get('SERIES_DRAMA_MOUNT', '/audio-dramas'),
@@ -201,16 +218,34 @@ def main():
         http = serve_imports(queue)
         last = None
         state = None
+        held = False
+        signal = None
         try:
             while True:
                 try:
                     enabled, interval = options()
+                    current_signal = retry_signal(held) if enabled else None
+                    force = bool(current_signal and (current_signal[0] != signal[0]
+                                 or current_signal[1] and current_signal[1] != signal[1]))
                     if not enabled:
                         if state != 'disabled':
                             atomic(STATE / 'status.json', dict(status='disabled', enabled=False, checked_at=time.time()))
                         state, last = 'disabled', None
-                    elif last is None or time.monotonic() - last >= interval:
-                        result = run(queue, True)
+                    elif last is None or force or time.monotonic() - last >= interval:
+                        before = current_signal or retry_signal(True)
+                        # Also consume this wakeup on failure. Provider outages
+                        # must use the normal retry interval.
+                        if held:
+                            signal = before
+                        from media_activity import recording, count, spool_series
+                        with recording() as activity:
+                            count('series_runs')
+                            try:
+                                result = run(queue, True)
+                            finally:
+                                spool_series(STATE, activity)
+                        held = bool(result.get('listenarr_conflicts'))
+                        signal = before if held else None
                         state = result['status']
                         atomic(STATE / 'status.json', dict(result, enabled=True, checked_at=time.time()))
                         last = time.monotonic()

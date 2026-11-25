@@ -631,6 +631,8 @@ class FolderManager:
         if len(matches) != 1:
             fail('folder_not_in_allowed_mount')
         root = matches[0]
+        from media_activity import record
+        record('folder', row.get('name') or row.get('kind'), 'mount')
         if self.mount_checker(root['worker']) is not True:
             fail('folder_mount_unavailable')
         try:

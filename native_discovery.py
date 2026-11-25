@@ -507,6 +507,8 @@ def _collect_hashed(bo, expected, abs_item, detail, manifest, capability, job, t
         digests = {}
         for role in ('source', 'overlay'):
             pin = proof[role]['pin']
+            from media_activity import record
+            record('readalong', expected.get('title'), role)
             try:digest = bo.file_sha256(pin['overlay_file_id'], pin['overlay_size'])
             except Exception as error:
                 if _definitive_original_failure(error):_revoke_original(bo, expected, proof, service, origin)
@@ -576,6 +578,8 @@ def collect_for_review(bo, expected, abs_item, detail, manifest):
     hashes = {}
     for role in ('source', 'overlay'):
         pin = proof[role]['pin']
+        from media_activity import record
+        record('readalong', expected.get('title'), role)
         try:digest = bo.file_sha256(pin['overlay_file_id'], pin['overlay_size'])
         except Exception as error:
             if _definitive_original_failure(error):_revoke_original(bo, expected, proof, service)

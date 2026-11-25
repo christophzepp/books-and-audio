@@ -193,6 +193,8 @@ class VariantProof:
               'fingerprint','feed_url','enclosure_url')
         if (fresh is None or any(fresh.get(key)!=mapping.get(key) for key in keys)
                 or fresh.get('abs_guid')!=mapping.get('abs_guid')):raise ValueError('variant_source_changed')
+        from media_activity import record
+        record('podcast', mapping.get('title'), 'variant')
         worker=Path(mapping['worker_path']);root=Path(cfg['worker_root'])
         if (not worker.is_absolute() or not root.is_absolute() or worker.resolve()!=worker
                 or root.resolve()!=root or not worker.is_relative_to(root)):raise ValueError('variant_source_path_changed')

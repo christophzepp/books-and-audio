@@ -1,6 +1,8 @@
 # Books & Audio
 
-**Öffentliche Beta · v0.1.0-beta.15**
+**Öffentliche Beta · v0.1.0-beta.16**
+
+Unter **Medienzugriffe** findest du Uhrzeit, Titel und Anlass der Prüfungen der letzten 24 Stunden oder sieben Tage. Die Buch- und Hörbuchseiten bieten eine Vorschau zur Bereinigung fehlender Zuordnungen.
 
 Unter **Zeitpläne** stellst du die Abfrageintervalle und das Wartungsfenster ein. Bei einer ungeklärten PinePods-Audiofassung merkt der Worker die Dateiprüfung auf dem Zustandsvolume vor. Standardmäßig prüft er diese Folgen zwischen 22 und 0 Uhr in der Zeitzone Europe/Berlin. Bereits bestätigte Titel gleichen ihren Fortschritt weiter im eingestellten Takt ab.
 

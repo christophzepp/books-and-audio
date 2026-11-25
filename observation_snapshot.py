@@ -3,7 +3,7 @@
 Snapshots are installed only around initial observation reads. They cannot send
 mutations. Exact admission, recovery, CAS checks and readback use the original
 clients after the scope exits. Every new cycle creates a new ObservationBatch.
-No media files, subscriptions, playback states or persistent cursors are changed.
+The applying worker may persist its read-only gPodder observations on the NVMe.
 """
 import copy
 from contextlib import contextmanager
@@ -195,11 +195,16 @@ class PineObservation(_MemoRequests, PinepodsClient):
         self._calibrated = {}
         self._metadata = {}
         self._actions_index = {}
+        self._action_store = None
+        self._persist_actions = False
         self._dirty_metadata=set()
         self._dirty_actions=set()
 
-    def invalidate_progress(self,*,feed_url=None,enclosure_url=None,**scope):
+    def invalidate_progress(self,*,feed_url=None,enclosure_url=None,reload_action_history=False,**scope):
         if feed_url is None or enclosure_url is None:
+            if self._action_store is not None:
+                for feed in list(self._action_store.histories):
+                    self._action_store.invalidate(feed)
             self._metadata.clear();self._actions_index.clear()
             self._calibrated.clear();self._catalogs.clear();self._catalog_data.clear()
             self._observation_cache.clear()
@@ -207,6 +212,9 @@ class PineObservation(_MemoRequests, PinepodsClient):
         key=(feed_url,enclosure_url)
         self._metadata.pop(key,None)
         self._dirty_metadata.add(key);self._dirty_actions.add(key)
+        if self._action_store is not None:
+            self._action_store.invalidate(feed_url, durable=reload_action_history)
+            self._actions_index.pop(feed_url, None)
         # Typed indexed readers retain unrelated actions. Explicit full-feed
         # readers (alias-history guards) must not receive the old raw envelope.
         self._drop_requests(lambda args,kwargs:args[1].startswith('/api/2/episodes/')
@@ -273,9 +281,28 @@ class PineObservation(_MemoRequests, PinepodsClient):
         self._count('api_observation_index_hits')
         return result
 
+    def _fetch_actions(self, **filters):
+        self._count('api_observation_requests')
+        return self._observation_source.actions(**filters)
+
+    def _feed_history(self, feed_url):
+        if not self._persist_actions:
+            return PinepodsClient.actions(self, feed_url)
+        if self._action_store is None:
+            from gpodder_observations import ActionHistory
+            self._action_store = ActionHistory(self._observation_owner, self, self._fetch_actions)
+        return self._action_store.read(feed_url)
+
+    def actions(self, feed_url=None, *, since=0, limit=None):
+        if self._persist_actions and feed_url and since == 0 and limit is None:
+            return copy.deepcopy(self._feed_history(feed_url))
+        return PinepodsClient.actions(self, feed_url, since=since, limit=limit)
+
     def _episode_actions(self, feed_url, enclosure_url):
         key=(feed_url,enclosure_url)
-        if key in self._dirty_actions:
+        if key in self._dirty_actions and self._persist_actions:
+            self._dirty_actions.discard(key)
+        elif key in self._dirty_actions:
             # gPodder exposes a per-feed history endpoint; read it live once
             # for the changed target, retaining all unrelated indexed actions.
             rows=self._observation_source._episode_actions(feed_url,enclosure_url)
@@ -288,7 +315,7 @@ class PineObservation(_MemoRequests, PinepodsClient):
             else:self._actions_index[feed_url][key]=selected
             self._dirty_actions.discard(key)
         if feed_url not in self._actions_index:
-            data = PinepodsClient.actions(self, feed_url)
+            data = self._feed_history(feed_url)
             index = {}
             for row in data['actions']:
                 index.setdefault((row['podcast'], row['episode']), []).append(row)
@@ -378,8 +405,9 @@ class ObservationBatch:
     scopes restore prior attributes on every exit, including failures. Unsupported
     fake/test clients remain unchanged. Never wrap a transaction or entire cycle.
     """
-    def __init__(self, owner=None):
+    def __init__(self, owner=None, *, persist_actions=False):
         self.owner = owner
+        self.persist_actions = persist_actions
         self._clients = {}
 
     def client(self, source):
@@ -393,6 +421,7 @@ class ObservationBatch:
                 snapshot = ABSObservation(source)
             elif type(source) is PinepodsClient:
                 snapshot = PineObservation(source)
+                snapshot._persist_actions = self.persist_actions
             else:
                 from bo_client import BOClient
                 from jellyfin_client import JellyfinClient

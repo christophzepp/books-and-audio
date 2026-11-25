@@ -333,6 +333,11 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         if self.command == "GET":
             self.require_session(session)
             getters = {"/api/status": self.server.store.status, "/api/connections": self.server.store.list_connections, "/api/folders": self.server.store.list_folders, "/api/events": self.server.store.events}
+            activity = re.fullmatch(r"/api/media-activity/(1|7)(?:/([0-9]{1,11})-([1-9][0-9]{0,17}))?", path)
+            if activity:
+                from media_activity import Journal
+                before = (int(activity[2]), int(activity[3])) if activity[2] else None
+                return self.respond(200, Journal(self.server.store.control).report(int(activity[1]), before))
             if path in getters:
                 return self.respond(200, getters[path]())
             match = re.fullmatch(r"/api/commands/([0-9a-f-]+)", path)
@@ -360,6 +365,20 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             if set(payload) != {"kind", "payload"} or payload["kind"] not in KINDS or not isinstance(payload["payload"], dict):
                 raise WebError(400, "Dieser Auftrag ist nicht gültig.")
             data = payload["payload"]
+            if payload["kind"] == "conflict.retry":
+                from structural_conflicts import valid_retry
+                if not valid_retry(data):
+                    raise WebError(400, "Bitte einen gültigen Konflikt auswählen.")
+            if payload["kind"] == "library.preview_missing" and (set(data)!={"media"} or data["media"] not in ("audio","ebook")):
+                raise WebError(400, "Bitte eine Buchbibliothek auswählen.")
+            if payload["kind"] == "library.retire_missing":
+                selected = data.get("selected")
+                if (set(data)!={"review_id","selected","confirm"} or data["confirm"] is not True
+                        or not isinstance(data["review_id"],str) or not UUID_RE.fullmatch(data["review_id"])
+                        or not isinstance(selected,list) or not 1<=len(selected)<=1000
+                        or any(not isinstance(key,str) or not re.fullmatch("[a-f0-9]{32}",key) for key in selected)
+                        or len(set(selected))!=len(selected)):
+                    raise WebError(400, "Bitte die geprüften Titel auswählen und die Entfernung bestätigen.")
             if payload["kind"] == "ebook.retry" and (set(data) not in (set(), {"file_id"})
                     or "file_id" in data and (type(data["file_id"]) is not int or data["file_id"] <= 0)):
                 raise WebError(400, "Bitte eine gültige E-Book-Datei auswählen.")

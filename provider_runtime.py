@@ -123,8 +123,13 @@ class BookBridgeCoordinator:
 
     def mappings(self):
         pairs = self.b.bookbridge.inventory()
+        retired = getattr(self.b,'retired_bookbridge_pairs',set())
         mappings, unsupported, seen = [], [], set()
         for pair in pairs:
+            if retired:
+                from bookorbit_scope import signature
+                if (pair.get('abs_id'), signature(pair_identity(pair))) in retired:
+                    continue
             if pair.get('audio_source') != 'ABS' or not pair.get('abs_id'):
                 unsupported.append(dict(title=safe_title(pair['title']), reason='Diese BookBridge-Zuordnung verwendet kein Audiobookshelf-Hörbuch.'))
                 continue

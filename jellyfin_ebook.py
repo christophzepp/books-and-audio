@@ -165,6 +165,8 @@ class EbookCoordinator:
         if e is None:
             if getattr(b,'media_guard',None):b.media_guard('ebooks')
             try:
+                from media_activity import record
+                record('ebook', m.get('title'), 'index')
                 path=Path(m['local_path']).resolve()
                 if 'folder_mappings' in config:
                     if path != Path(m['local_path']): raise ValueError('EPUB symlink or noncanonical path excluded')

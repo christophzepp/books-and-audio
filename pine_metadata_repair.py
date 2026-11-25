@@ -222,6 +222,8 @@ class PineMetadataRepair:
         current = api_source(self.b, mapping)
         cfg = settings(self.b)
         increment(self.b, 'podcast_metadata_source_checks')
+        from media_activity import record
+        record('podcast', mapping.get('title'), 'duration')
         worker = Path(mapping['worker_path'])
         root = Path(cfg['worker_root'])
         if (not worker.is_absolute() or not root.is_absolute() or worker.resolve() != worker

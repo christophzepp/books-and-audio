@@ -12,6 +12,7 @@ import ipaddress
 import json
 import math
 import re
+import time
 from urllib.parse import quote, urlsplit
 
 import requests
@@ -22,6 +23,10 @@ class RequestError(Exception):
     def __init__(self, message, status=None):
         super().__init__(message)
         self.status = status
+
+
+class ActionBatchTooLarge(RequestError):
+    """This result cannot attest to a complete action inventory."""
 
 
 class EpisodeUnavailable(RequestError):
@@ -178,6 +183,8 @@ class PinepodsClient:
         if r.status_code != 200:
             raise RequestError('PinePods: API request failed', r.status_code)
         try:
+            if len(r.content) > self.MAX_BODY and path.startswith('/api/2/episodes/'):
+                raise ActionBatchTooLarge('PinePods: invalid episode action inventory (response size)')
             if len(r.content) > self.MAX_BODY:
                 raise ValueError()
             return r.json()
@@ -201,8 +208,14 @@ class PinepodsClient:
         except ValueError:
             raise RequestError('PinePods: invalid device inventory') from None
 
-    def actions(self, feed_url=None):
-        params = {'since': 0, 'aggregated': 'false'}
+    def actions(self, feed_url=None, *, since=0, limit=None):
+        if type(since) is not int or not 0 <= since <= 253_402_300_799:
+            raise ValueError('Invalid gPodder cursor')
+        params = {'since': since, 'aggregated': 'false'}
+        if limit is not None:
+            if type(limit) is not int or not 1 <= limit <= self.MAX_ACTIONS:
+                raise ValueError('Invalid gPodder row limit')
+            params['limit'] = limit
         if feed_url is not None:
             _url(feed_url)
             params['podcast'] = feed_url
@@ -212,7 +225,7 @@ class PinepodsClient:
                 raise ValueError()
             _number(data.get('timestamp'), maximum=253_402_300_799)
             if len(data['actions']) > self.MAX_ACTIONS:
-                raise ValueError()
+                raise ActionBatchTooLarge('PinePods: invalid episode action inventory (row limit)')
             for row in data['actions']:
                 if not isinstance(row, dict):
                     raise ValueError()
@@ -233,10 +246,11 @@ class PinepodsClient:
         except ValueError:
             raise RequestError('PinePods: invalid episode action inventory') from None
 
-    def probe(self):
-        """Authenticated own-user GETs only, with no session or device creation."""
+    def probe(self, *, action_limit=1):
+        """Verify endpoint access; a worker guard needs no complete action history."""
         devices = self.devices()
-        actions = self.actions()
+        actions = (self.actions() if action_limit is None
+                   else self.actions(since=max(0, int(time.time()) - 1), limit=action_limit))
         supported = False
         if self._api_key and self.server_version == '0.9.0':
             self._ensure_native()
@@ -244,7 +258,7 @@ class PinepodsClient:
             supported = True
         return {'username': self.username, 'device_id': self.device_id,
                 'device_exists': self.device_id in devices, 'protocol': self.PROTOCOL,
-                'actions': len(actions['actions']),
+                ('actions' if action_limit is None else 'sampled_actions'): len(actions['actions']),
                 'server_version': self.server_version, 'progress_sync_supported': supported,
                 'native_import_disabled': supported,
                 'completion_margin_seconds': self.completion_margin_seconds}

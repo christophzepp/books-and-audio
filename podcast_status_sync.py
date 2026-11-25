@@ -290,6 +290,7 @@ class StatusCoordinator:
         changed=version_receipt(previous_proof)!=version_receipt(proof)
         if (changed and not same_user_progress(previous_raw,fresh_raw)
                 or not changed and not raw_equal(previous_raw,fresh_raw)):
+            self.c.refresh_changed_gpodder(mapping, previous_raw, fresh_raw)
             raise StatusConflict('variant_concurrent_status_change')
         return current,fresh_raw
 
@@ -299,6 +300,7 @@ class StatusCoordinator:
         proof=mapping['_variant_proof']; binding=self.binding(mapping,proof)
         self.mark(mapping,status='enrolled' if stored.get('enrolled') else 'joining')
         if stored.get('binding') and stored['binding'] != binding:
+            mapping['_structural_conflict'] = 'variant_identity_changed'
             raise StatusConflict('variant_identity_changed')
         if stored.get('enrolled') and not stored.get('pending') and getattr(self.c, 'observation', None) is not None:
             with self.c.observing(self):states,raw=self.read(mapping,proof)

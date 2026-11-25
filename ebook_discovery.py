@@ -231,6 +231,8 @@ def discover(bo,jf,spec,existing,previous,now,*,stable_seconds=60,metrics=None,i
             if not matches:raise FileNotFoundError('Jellyfin EPUB is not indexed yet')
             if len(matches)!=1 or matches[0]['Id'] in existing_jf:raise ValueError('Ambiguous Jellyfin ebook identity')
             if media_guard is not None and not guarded:media_guard();guarded=True
+            from media_activity import record
+            record('ebook', title, 'discovery')
             root=Path(spec['local_root']).resolve(strict=True);path=root/rel
             if path.resolve(strict=True)!=path or not path.is_file():raise ValueError('Ebook symlink or non-file excluded')
             before=path.stat()

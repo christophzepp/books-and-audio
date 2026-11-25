@@ -310,7 +310,7 @@ class Administration:
                     from jellyfin_audio import bind
                     inventory = candidate.jellyfin.items(parent=test_cfg['jellyfin']['audio_library_id'])
                     if any(bind(mapping, inventory, test_cfg) is None for mapping in mappings): return False
-                    ebooks = test_cfg['jellyfin'].get('ebooks', []) + candidate.load('_ebook_discovery').get('mappings', [])
+                    ebooks = getattr(candidate,'config',test_cfg)['jellyfin'].get('ebooks', []) + candidate.load('_ebook_discovery').get('mappings', [])
                     for ebook in ebooks:
                         items = candidate.jellyfin.items(ids=[ebook['jf_id']], types='Book')
                         if len(items) != 1 or items[0].get('Path') != ebook['jf_path']: return False
@@ -571,7 +571,7 @@ class Administration:
                         inventory = candidate.jellyfin.items(parent=cfg['jellyfin']['audio_library_id'])
                         if any(bind(mapping, inventory, cfg) is None for mapping in mappings):
                             raise ValueError('unmatched_jellyfin_audio')
-                        ebooks = cfg['jellyfin'].get('ebooks', []) + candidate.load('_ebook_discovery').get('mappings', [])
+                        ebooks = getattr(candidate,'config',cfg)['jellyfin'].get('ebooks', []) + candidate.load('_ebook_discovery').get('mappings', [])
                         coordinator = EbookCoordinator(candidate)
                         for mapping in ebooks: coordinator.handle(mapping, False, 0, force_media=True)
                     return {'ok': True, 'provider': 'bookorbit', 'audiobooks': len(mappings),
@@ -614,6 +614,9 @@ class Administration:
         try:
             if kind in ('bookorbit.preview_scope','bookorbit.approve_scope'):
                 bookorbit_scope.process(self,kind,payload,ident)
+            elif kind in ('library.preview_missing','library.retire_missing'):
+                import library_cleanup
+                library_cleanup.process(self,bridge,kind,payload,ident)
             elif kind == 'schedule.update':
                 try:
                     self.store.finish(ident, result=self.schedule.update(payload))
@@ -681,6 +684,18 @@ class Administration:
             elif kind.startswith('provider.'):
                 result = self.manager.provider(payload, self.provider_check, apply=kind == 'provider.activate')
                 self.store.finish(ident, result=result, error=None if result.get('ok') else connection_error(result.get('code')))
+            elif kind == 'conflict.retry':
+                from structural_conflicts import PREFIX, valid_retry
+                if not valid_retry(payload):
+                    raise ValueError('Bitte einen gültigen Konflikt auswählen.')
+                if payload['type'] == 'listenarr':
+                    self.schedule.retry_listenarr(payload['id'], ident)
+                elif bridge is None:
+                    raise ValueError('Die Podcastverbindungen sind nicht verfügbar.')
+                else:
+                    with bookorbit_scope.podcast_database(bridge), bridge.db:
+                        bridge.db.execute('DELETE FROM state WHERE id=?', (PREFIX + payload['id'],))
+                self.store.finish(ident, result={'message': 'Für den nächsten Abgleich zur erneuten Prüfung vorgemerkt.'})
             elif kind == 'ebook.retry':
                 if (set(payload) not in (set(), {'file_id'}) or 'file_id' in payload
                         and (type(payload['file_id']) is not int or payload['file_id'] <= 0)):
@@ -883,6 +898,8 @@ def public_podcasts(value, config, paused):
     for row in value.get('episodes', []):
         if not isinstance(row, dict): continue
         item = {key: copy.deepcopy(row[key]) for key in allowed if key in row}
+        if row.get('can_retry_conflict') is True:
+            item['can_retry_conflict'] = True
         # The coordinator names the playback state `status` and its cycle result
         # `progress_status`; the GUI uses the same shape as existing book rows.
         canonical = row.get('status')
@@ -993,6 +1010,18 @@ def participant_block(root, cfg):
 
 
 def run_admin_loop(args, root, config, credentials, bridge_type):
+    from media_activity import Journal, recording
+    from disk_activity import sampling
+    journal = Journal(Path(root) / 'control')
+    with recording() as activity, sampling(Path(root) / 'control'):
+        try:
+            return _admin_loop(args, root, config, credentials, bridge_type, journal, activity)
+        finally:
+            journal.flush(activity)
+
+
+def _admin_loop(args, root, config, credentials, bridge_type, journal, activity):
+    from media_activity import count
     admin = Administration(root, args.key, dict(config, settle_seconds=args.settle), credentials, bridge_type)
     try: admin.ensure_identities()
     except Exception: pass  # Existing sync safety checks still govern operation.
@@ -1006,6 +1035,7 @@ def run_admin_loop(args, root, config, credentials, bridge_type):
                 admin.process_one(bridge,preview_only=True)
     try:
         while True:
+            journal.flush(activity)
             cfg, creds, disabled = admin.effective()
             disabled = disabled or participant_block(root, cfg)
             if disabled == 'required_connection_disabled':
@@ -1031,6 +1061,9 @@ def run_admin_loop(args, root, config, credentials, bridge_type):
                 next_cycle = 0
                 continue
             if time.monotonic() >= next_cycle:
+                journal.import_series(Path(root) / 'series-status', int(time.time()))
+                if not admin.store.paused():
+                    count('cycles')
                 if disabled or admin.store.paused():
                     try: previous = json.loads((Path(root) / 'last-run.json').read_text())
                     except (OSError, ValueError): previous = {}

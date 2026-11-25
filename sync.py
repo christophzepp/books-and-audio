@@ -181,6 +181,8 @@ class Bridge:
           CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, book TEXT NOT NULL, value TEXT NOT NULL, status TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, at TEXT, book TEXT, kind TEXT, detail TEXT);
           CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS retired_book_seeds (media TEXT NOT NULL, local_id TEXT NOT NULL,
+            seed TEXT NOT NULL, pin TEXT NOT NULL, pause TEXT NOT NULL, PRIMARY KEY(media,local_id,seed,pin,pause));
           CREATE TABLE IF NOT EXISTS auto_mappings (id TEXT PRIMARY KEY, bo_id INTEGER UNIQUE NOT NULL, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS mapping_revision_overrides
             (id TEXT PRIMARY KEY, bo_id INTEGER UNIQUE NOT NULL, base_fingerprint TEXT NOT NULL, value TEXT NOT NULL);
@@ -196,6 +198,9 @@ class Bridge:
             (id TEXT PRIMARY KEY, bo_id INTEGER NOT NULL, proof TEXT NOT NULL);
         ''')
         self.db.commit()
+        from library_cleanup import overlay
+        self.config = overlay(self.config, self.db)
+        self.retired_bookbridge_pairs = set(self.db.execute("SELECT local_id,seed FROM retired_book_seeds WHERE media='bookbridge'"))
 
     def load(self, id):
         row = self.db.execute('SELECT value FROM state WHERE id=?', (id,)).fetchone()

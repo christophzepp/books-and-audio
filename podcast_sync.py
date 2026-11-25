@@ -401,7 +401,7 @@ class PodcastCoordinator:
         self.variant_checker = None
         self.feed_resolver = None
 
-    def invalidate_observations(self,mapping=None,services=None,*,metadata=False):
+    def invalidate_observations(self,mapping=None,services=None,*,metadata=False,reload_action_history=False):
         """Discard changed target progress while retaining unrelated catalogs."""
         batch=getattr(self,'observation',None)
         if batch is None:return
@@ -421,9 +421,16 @@ class PodcastCoordinator:
             elif service in ('pine','pinepods','gpodder') and self.pine is not None:
                 routes=[mapping,mapping.get('_pine_route') or {},mapping.get('_variant_proof') or {}]
                 for feed,enclosure in {(row.get('feed_url'),row.get('enclosure_url')) for row in routes}:
-                    if feed and enclosure:batch.invalidate(self.pine,feed_url=feed,enclosure_url=enclosure)
+                    if feed and enclosure:
+                        batch.invalidate(self.pine, feed_url=feed, enclosure_url=enclosure,
+                                         reload_action_history=reload_action_history)
                 if metadata:self.feed_resolver=None
             else:batch.invalidate()
+
+    def refresh_changed_gpodder(self, mapping, previous, fresh):
+        receipt = (previous.get('pinepods') or {}).get('gpodder_revision')
+        if receipt is not None and receipt != (fresh.get('pinepods') or {}).get('gpodder_revision'):
+            self.invalidate_observations(mapping, ('pine',), reload_action_history=True)
 
     def mutate(self,action,*args,_mapping=None,_services=None,**kwargs):
         # A lost response may already have changed remote state. Mark its exact
@@ -479,6 +486,7 @@ class PodcastCoordinator:
             from podcast_status_sync import StatusCoordinator,StatusConflict,version_receipt
             proof=route_proof(self,mapping,reviewed['route'],refresh=refresh,force_source=force_source,authorize=authorize)
             if StatusCoordinator(self).binding(mapping,proof)!=reviewed['binding'] or version_receipt(proof)!=reviewed['version']:
+                mapping['_structural_conflict'] = 'variant_identity_changed'
                 raise StatusConflict('variant_identity_changed')
             return proof
         if reviewed.get('mode') == 'reported':
@@ -486,6 +494,7 @@ class PodcastCoordinator:
             proof = reported_proof(self, mapping, refresh=refresh, force_source=force_source,authorize=authorize)
             if (StatusCoordinator(self).binding(mapping, proof) != reviewed['binding']
                     or version_receipt(proof) != reviewed['version']):
+                mapping['_structural_conflict'] = 'variant_identity_changed'
                 raise StatusConflict('variant_identity_changed')
             return proof
         from podcast_variant_proof import VariantProof
@@ -532,6 +541,7 @@ class PodcastCoordinator:
         old=saved.get('pine_alias_fingerprint') or pending.get('pine_alias_fingerprint')
         if row is None:
             if old or mapping.get('_pine_alias_fingerprint'):
+                mapping['_structural_conflict'] = 'alias_missing'
                 raise AliasError('Previously used PinePods alias is missing; review required')
             return None
         try:record=json.loads(row[0])
@@ -719,6 +729,7 @@ class PodcastCoordinator:
                 code = 'metadata_repair_pending'
         if code:
             if enrolled or not optional:
+                mapping['_pine_reason_code'] = code
                 raise ValueError(PINE_REASONS[code])
             mapping.update(_pine_selected=False, _pine_status='waiting', _pine_reason_code=code)
             return self.observe_read(mapping)
@@ -924,7 +935,9 @@ class PodcastCoordinator:
         def unchanged():
             guard(b); self.verify_mapping(mapping)
             _, fresh = self.read(mapping)
-            if not raw_equal(fresh, raw): raise RuntimeError('Concurrent podcast progress changed before transfer')
+            if not raw_equal(fresh, raw):
+                self.refresh_changed_gpodder(mapping, raw, fresh)
+                raise RuntimeError('Concurrent podcast progress changed before transfer')
             if mapping['jf']['id'] in self.jf.active_ids(): raise RuntimeError('Jellyfin podcast playback began during transfer')
 
         unchanged()
@@ -1112,7 +1125,7 @@ class PodcastCoordinator:
         if self.pine: self.accounts['pinepods']=self.pine.identity
         self.account_guard(apply)
         from observation_snapshot import ObservationBatch
-        self.observation = ObservationBatch(self.b)
+        self.observation = ObservationBatch(self.b, persist_actions=apply)
         with self.observing():
             mappings, issues = self.mappings()
         if apply and self.pine:
@@ -1136,6 +1149,10 @@ class PodcastCoordinator:
         if orphaned: raise RuntimeError('An unavailable podcast episode has an unresolved transfer')
         file_checks = PodcastFileChecks(self.b, apply)
         mappings = file_checks.maintenance_order(mappings)
+        from structural_conflicts import PodcastConflicts
+        conflicts = PodcastConflicts(self, apply)
+        for removed in conflicts.entries.keys() - live:
+            conflicts.discard(removed)
         listed = live | {row['id'] for row in issues}
         for removed in set(file_checks.entries) - listed:
             file_checks.discard(removed)
@@ -1156,6 +1173,16 @@ class PodcastCoordinator:
             row = dict(id=mapping['id'], title=mapping['title'], show=mapping['show'], duration=mapping['duration'],
                        participants=['abs','jf'] + (['pinepods','gpodder'] if self.pine else []),
                        pine_status='joining' if self.pine else 'disabled',reviewed_route=self.b.load('_pine_transition:'+mapping['id']).get('mode')=='personal_route')
+            cached = conflicts.remembered(mapping)
+            if cached is not None:
+                action = cached['progress_status']
+                if action == 'blocked':
+                    result['blocked'].append(dict(id=mapping['id'], title=mapping['title'], reason=cached['reason']))
+                else:
+                    result[action] += 1
+                cached.update(title=mapping['title'], show=mapping['show'])
+                result['episodes'].append(cached)
+                continue
             try:
                 with file_checks.episode(mapping) as check:
                     action, states = self.handle(mapping, apply, settle)
@@ -1194,6 +1221,7 @@ class PodcastCoordinator:
                         self.b.alert(row['id'],'Podcast-Sync pausiert: '+row['title']+' — '+reason)
                 self.pine_row(mapping, row)
                 if service_unavailable(exc):
+                    conflicts.discard(mapping['id'])
                     result['episodes'].append(row)
                     for deferred in mappings[index+1:]:
                         result['episodes'].append(dict(id=deferred['id'],title=deferred['title'],show=deferred['show'],
@@ -1203,6 +1231,7 @@ class PodcastCoordinator:
                     result['waiting']+=len(mappings)-index-1
                     break
             self.pine_row(mapping, row)
+            conflicts.record(mapping, row)
             result['episodes'].append(row)
         for status in ('waiting','enrolled','joining','blocked'):
             result['pine_'+status] = sum(row.get('pine_status') == status for row in result['episodes'])

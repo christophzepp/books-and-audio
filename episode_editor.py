@@ -56,10 +56,13 @@ def route_proof(c,m,route,*,refresh=True,force_source=False,authorize=False):
     identity=native_binding(n,dest,c.pine.identity)
     if (any(identity[k]!=route[k] for k in ('native_episode_id','native_user_id','native_podcast_id'))
             or n['metadata'].get('episodetitle')!=m['title']):
+        m['_structural_conflict'] = 'variant_identity_changed'
         raise ReviewError('Der persönliche PinePods-Eintrag passt nicht mehr zur Folge.')
     source=VariantProof(c.b).source_snapshot(m,allow_cached=not refresh and not force_source,identity=identity,require_cached=authorize and not refresh and not force_source)
     d=n['duration']
     if type(d) not in (int,float) or not math.isfinite(d) or not 1<=d<=172800:
+        if d == 0:
+            m['_structural_conflict'] = 'duration_mismatch'
         raise ReviewError('PinePods meldet keine verwendbare Laufzeit.')
     if 'old_actions' in route and source_history_evidence(m,c.pine.actions(m['feed_url'])['actions'])!=route['old_actions']:
         raise ReviewError('Unter der früheren Audio-Adresse hat sich der Hörstand geändert. Bitte erneut prüfen.')

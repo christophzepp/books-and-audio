@@ -147,6 +147,12 @@ class MaintenanceSchedule:
     def publish_organizer(self):
         values = self.public()['values']
         data = {'enabled': values['series_enabled'], 'interval_seconds': values['series_interval_seconds']}
+        window = {'podcast_maintenance': {'timezone': values['podcast_timezone'],
+                    'start_hour': values['podcast_start_hour'], 'end_hour': values['podcast_end_hour']}}
+        window_path = self.control / 'maintenance-window.json'
+        from listenarr_conflicts import read
+        if read(window_path) != window:
+            atomic(window_path, window)
         path = self.control / 'settings.json'
         try:
             if json.loads(path.read_text()) == data:
@@ -168,7 +174,24 @@ class MaintenanceSchedule:
         for key in ('moved', 'empty_dirs_removed', 'skipped', 'conflicts'):
             if type(raw.get(key)) is int and raw[key] >= 0:
                 public[key] = raw[key]
+        rows = raw.get('listenarr_conflicts')
+        if isinstance(rows, list):
+            public['listenarr_conflicts'] = [
+                dict(id=r['id'], title=r['title'][:200], reason=r['reason'][:200])
+                for r in rows if isinstance(r, dict) and isinstance(r.get('id'), str)
+                and r['id'].isascii() and r['id'].isdigit() and 0 < len(r['id']) <= 20
+                and isinstance(r.get('title'), str) and isinstance(r.get('reason'), str)]
         return public
+
+    def retry_listenarr(self, key, command_id):
+        from listenarr_conflicts import read
+        current = {item['id'] for item in self.organizer_status().get('listenarr_conflicts', [])}
+        if key not in current:
+            raise ScheduleError('Dieser Hörspielkonflikt ist bereits erledigt. Bitte aktualisieren.')
+        path = self.control / 'listenarr-retries.json'
+        requests = {k:v for k,v in read(path).items() if k in current}
+        requests[key] = command_id
+        atomic(path, requests)
 
 
 def admin_health_age(root, now):

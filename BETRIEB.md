@@ -157,3 +157,17 @@ Die Freigabe liegt im verschlüsselten Verbindungsbestand. Ein anderer Konto- od
 ### Leerer Buchbestand nach der Trennung von BookBridge
 
 Wurde der frühere Buchbestand bewusst entfernt, dürfen bei `bookbridge_policy.phase = detached` die beiden expliziten Felder `"mappings": []` und `"native_readalong": {}` leer sein. Die Freigabe der laufenden Dienste, Konten und Medienordner gilt auch für einen leeren Bestand. Die aktivierte automatische Zuordnung prüft neu hinzukommende Titel nach der eingestellten Wartezeit auf stabile Identität. Ein verbliebener EPUB-Nachweis ohne zugehöriges Hörbuch sperrt die Prüfung. Das Leeren statischer Listen löscht keine bereits gespeicherten automatischen Zuordnungen, Freigaben oder Hörstände.
+
+## Medienzugriffe auswerten
+
+Die Seite **Medienzugriffe** zeigt die letzten 24 Stunden oder sieben Tage. Jede protokollierte Prüfung erscheint mit Zeitpunkt, Anlass und Titel bzw. Ordner. Die Summen werden minutengenau auf dem Zustandsvolume gespeichert. Die Liste enthält die jüngsten 20.000 Prüfungen. Eine Ordnerprüfung kann mehrere Systemaufrufe auslösen. API-Beobachtungen, wiederverwendete Nachweise und die beim Lesen für den EPUB-Positionsindex gezählten Bytes haben jeweils eigene Zähler. Ein Lauf mit null Prüfungen ist von einem Zeitraum ohne erfasste Läufe zu unterscheiden.
+
+Für eine fortlaufende Messung kann der Betreiber die Linux-Gerätenamen seiner physischen Medienfestplatten in `/state/control/media-disks.json` hinterlegen, etwa `{"devices":["sdb","sdc"]}`. Der Worker liest jede Minute die vom Kernel geführten Zähler. Das funktioniert auch bei schlafenden Platten. Die ersten Werte erscheinen nach zwei Messpunkten. Sie zählen abgeschlossene Lese- und Schreibvorgänge aller Dienste. Der Energiezustand und der auslösende Prozess lassen sich daraus allein nicht bestimmen. Nach einem Hardwarewechsel die Geräteauswahl prüfen. Eine fehlende Datei oder eine leere Liste deaktiviert die Messung. Unterbrechungen erscheinen als Lücken.
+
+Der optionale Import übernimmt vorhandene HDD-Messungen des Serverwächters im Format `das-access-audit/events.jsonl`. Die Oberfläche zeigt sie getrennt von der laufenden Kernelmessung. Übergib den Export auf dem Host über die Standardeingabe. Für die portable Compose-Datei lautet der Aufruf:
+
+```sh
+docker compose exec -T worker python watcher_import.py < /pfad/zur/messung/events.jsonl
+```
+
+Als Dienstnamen den Worker des jeweiligen Stacks einsetzen. Der Import liest die vorhandene Protokolldatei. Er fragt keine Festplatte nach ihrem Energiezustand. Die angezeigten I/O-Zahlen umfassen alle Prozesse auf den erfassten Daten- und Paritätsplatten. Zwischen Messpunkten mit mehr als zwei Minuten Abstand wird kein Wert errechnet. Für fortlaufende Berichte kann der Wächter seinen Export nach Abschluss einer Messung auf dieselbe Weise übergeben. Erneute Importe derselben Messminuten ersetzen deren bisherige Werte.

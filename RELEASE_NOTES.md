@@ -1,3 +1,10 @@
+## 0.1.0-beta.16 – Medienzugriffe und Bibliothekspflege
+
+- Der Worker merkt sich unveränderte strukturelle Zuordnungskonflikte. Auch der Hörspiel-Organizer stellt wiederkehrende Listenarr-Zielkonflikte zurück. Geänderte Katalogdaten, eine manuelle Prüfung und das Wartungsfenster ermöglichen den nächsten Versuch.
+- Der gPodder-Abgleich führt den letzten Abrufstand auf dem Zustandsvolume. Er berücksichtigt überlappende Zeitstempel und verspätete Aktionen. Der Trackingdienst für Floppy behält seinen eigenen Importstand.
+- Die neue Seite **Medienzugriffe** zeigt Prüfungen nach Zeitpunkt, Titel und Anlass sowie API-Beobachtungen. Hinzu kommen wahlweise passive Linux-Messwerte für ausgewählte Medienfestplatten und importierte Messungen des Serverwächters. Beide Quellen werden getrennt dargestellt.
+- Fehlende Bücher und Hörbücher lassen sich nach einer Vorschau gezielt aus dem aktiven Abgleich nehmen. Die Erkennung neuer Titel bleibt aktiv.
+
 ## 0.1.0-beta.15 – Hörspielimporte auf mergerfs
 
 Der Hörspiel-Organizer unterstützt Medienpools, auf denen Hardlinks funktionieren und der exklusive Verzeichniswechsel mit `EINVAL` scheitert. Vor der Freigabe einer Folge prüft er die beteiligten Dateien. Bereits belegte Ziele mit abweichendem Inhalt führen zu einem Konflikt.

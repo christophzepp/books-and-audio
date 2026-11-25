@@ -39,6 +39,10 @@ class Defer(Exception):
     """This entry cannot safely be changed on this run."""
 
 
+class TargetCollision(Defer):
+    """Only a confirmed target collision can suspend future filesystem probes."""
+
+
 @contextmanager
 def maintenance_guard():
     """Join the two existing root-owned lock files. Never create, replace or remove them."""
@@ -202,7 +206,7 @@ def primary_series_asin(book):
               and member.get('seriesName') and identity(member['seriesName']) == identity(book.get('series'))
               and member.get('isPrimary', True)}
     if len(values) > 1:
-        raise Defer('mehrdeutige Serienidentität')
+        raise TargetCollision('mehrdeutige Serienidentität')
     return next(iter(values), None) or book.get('seriesAsin')
 
 
@@ -223,7 +227,7 @@ def check_series_identity(book, target, current):
         if other:
             known_asins.add(other)
     if len(known_names) > 1 or len(known_asins) > 1:
-        raise Defer('verschiedene Serien beanspruchen denselben Serienordner')
+        raise TargetCollision('verschiedene Serien beanspruchen denselben Serienordner')
 
 
 def browse(api, path):
@@ -297,9 +301,9 @@ def check_free_target(api, target):
             if identity(item['name']) != identity(child.name):
                 continue
             if child == target or item['name'] != child.name or not item['isDirectory']:
-                raise Defer('Ziel existiert oder kollidiert')
+                raise TargetCollision('Ziel existiert oder kollidiert')
     if browse(api, target) is not None:
-        raise Defer('Zielordner existiert')
+        raise TargetCollision('Zielordner existiert')
 
 
 def native_source(api, book):
@@ -536,14 +540,16 @@ def reconcile_one(api, row, apply):
     check_series_identity(book, target, current)
     occupied = owners(current)
     if any(occupied[identity(p)] != {book_id} for p in (target, source)):
-        raise Defer('Quelle oder Ziel mehrfach beansprucht')
+        raise TargetCollision('Quelle oder Ziel mehrfach beansprucht')
     for entry in current:
         if entry['id'] == book_id or not entry.get('basePath'):
             continue
         other = Path(identity(entry['basePath']))
         for protected in (Path(identity(source)), Path(identity(target))):
             if other in protected.parents or protected in other.parents:
-                raise Defer('Bibliothekseintrag überlappt Quelle oder Ziel')
+                raise TargetCollision('Bibliothekseintrag überlappt Quelle oder Ziel')
+    from media_activity import record
+    record('series', row.get('title'), 'series_target')
     tree = folder_tree(api, source)
     if not all(tree.get(name) is False for name in facts):
         raise Defer('registrierte Datei fehlt im Quellordner')
@@ -612,6 +618,10 @@ def run(api, apply):
             print(f'Früherer Auftrag wird zurückgestellt: {error}', flush=True)
             return dict(moved=0, skipped=0, conflicts=1, empty_dirs_removed=0)
     library = api.call('library')
+    from listenarr_conflicts import ListenarrConflicts, signature
+    control = HostPath(os.environ.get('SERIES_SETTINGS', '/series-control/settings.json')).parent
+    parked = ListenarrConflicts(PENDING.parent, control) if apply else None
+    keep = set()
     config_checked = False
     waiting = 0
     deferred = 0
@@ -628,12 +638,26 @@ def run(api, apply):
             if row.get('fileCount') == 0:
                 waiting += 1
                 continue
+            key = str(row['id'])
+            if parked and key in parked.rows:
+                stamp = signature(row, library, target_for, Defer)
+                if parked.held(key, stamp):
+                    keep.add(key)
+                    deferred += 1
+                    continue
             with maintenance_guard() if apply else nullcontext():
                 if not config_checked:
                     validate_config(api)
                     config_checked = True
                 removed += reconcile_one(api, row, apply) or 0
             processed += 1
+        except TargetCollision as error:
+            deferred += 1
+            if parked:
+                key = str(row['id'])
+                parked.record(key, signature(row, library, target_for, Defer), row.get('title'), error)
+                keep.add(key)
+            print(f'Zurückgestellt #{row["id"]}: {error}', flush=True)
         except Defer as error:
             deferred += 1
             print(f'Zurückgestellt #{row["id"]}: {error}', flush=True)
@@ -646,5 +670,10 @@ def run(api, apply):
     print(f'Bereits korrekt zugeordnet: {aligned}. {action}: {processed}. '
           f'Warten auf Import: {waiting}. Zurückgestellt: {deferred}.', flush=True)
 
-    return dict(moved=processed + recovered, skipped=aligned + waiting, conflicts=deferred,
-                empty_dirs_removed=removed)
+    if parked:
+        parked.cleanup(keep)
+    result = dict(moved=processed + recovered, skipped=aligned + waiting, conflicts=deferred,
+                  empty_dirs_removed=removed)
+    if parked and parked.rows:
+        result['listenarr_conflicts'] = parked.public()
+    return result

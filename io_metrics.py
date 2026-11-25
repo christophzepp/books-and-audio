@@ -9,6 +9,9 @@ def increment(owner, name, amount=1):
         values = {}
         owner._io_metrics = values
     values[name] = values.get(name, 0) + amount
+    from media_activity import COUNTERS, count
+    if name in COUNTERS:
+        count(COUNTERS[name], amount)
 
 
 def snapshot(owner):
