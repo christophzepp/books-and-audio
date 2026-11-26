@@ -6,11 +6,12 @@ No record here is an outgoing action, a playback baseline or a Floppy cursor.
 """
 from collections import defaultdict
 from contextlib import contextmanager
+from functools import partial
 import hashlib
 import json
 
 from maintenance_settings import podcast_window
-from pinepods_client import ActionBatchTooLarge, RequestError, action_epoch
+from pinepods_client import ActionBatchTooLarge, EpisodeUnavailable, RequestError, action_epoch
 
 
 def encode(value):
@@ -19,6 +20,13 @@ def encode(value):
 
 def fingerprint(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
+
+
+def repeat_failure(error):
+    """Keep the diagnostic without retaining a response through its traceback."""
+    if isinstance(error, EpisodeUnavailable):
+        return partial(type(error), error.reason)
+    return partial(type(error), str(error), status=error.status)
 
 
 class ActionHistory:
@@ -127,14 +135,14 @@ class ActionHistory:
 
     def _prepare(self):
         if self.error is not None:
-            raise self.error
+            raise self.error()
         if self.ready:
             return
         try:
             self._refresh()
         except RequestError as exc:
             # One failed network request per cycle, even for 1,000 episodes.
-            self.error = exc
+            self.error = repeat_failure(exc)
             raise
         self.ready = True
         if self.window:
@@ -172,12 +180,12 @@ class ActionHistory:
                 self._complete(audit)
             except RequestError as exc:
                 # An unavailable archival feed cannot block another feed.
-                self.feed_errors[audit] = exc
+                self.feed_errors[audit] = repeat_failure(exc)
                 with self._transaction():
                     self.db.execute('UPDATE gpodder_observation_feed SET attempted=? WHERE account=? AND feed=?',
                                     (self.now, self.account, audit))
         if feed in self.feed_errors:
-            raise self.feed_errors[feed]
+            raise self.feed_errors[feed]()
         if feed not in self.histories:
             row = self.db.execute('SELECT actions FROM gpodder_observation_feed WHERE account=? AND feed=?',
                                   (self.account, feed)).fetchone()
@@ -185,7 +193,7 @@ class ActionHistory:
                 try:
                     self._complete(feed)
                 except RequestError as exc:
-                    self.feed_errors[feed] = exc
+                    self.feed_errors[feed] = repeat_failure(exc)
                     raise
             else:
                 self.histories[feed] = json.loads(row[0])

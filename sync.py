@@ -1,7 +1,12 @@
 """Personal progress coordinator, with explicit BookOrbit or BookBridge ownership."""
 from __future__ import annotations
 
-import argparse
+from worker_cli import main
+
+# Docker runs this entry point for both synchronization and periodic health probes.
+if __name__ == '__main__':
+    raise SystemExit(main())
+
 import copy
 import datetime as dt
 import fcntl
@@ -967,16 +972,18 @@ class Bridge:
         return final
 
     def cycle(self, apply=False, settle=30):
+        from observation_snapshot import ObservationBatch
+        self._book_observations = ObservationBatch(self)
         self._mapping_cycle_active = True
         self.invalidate_mapping_observations()
         try:return self._cycle(apply, settle)
         finally:
+            self._book_observations.close()
+            self._book_observations = None
             self._mapping_cycle_active = False
             self.invalidate_mapping_observations()
 
     def _cycle(self, apply=False, settle=30):
-        from observation_snapshot import ObservationBatch
-        self._book_observations=ObservationBatch(self)
         if getattr(self, 'provider', 'bookorbit') == 'bookbridge':
             from provider_runtime import BookBridgeCoordinator
             return BookBridgeCoordinator(self).cycle(apply, settle)
@@ -1086,20 +1093,7 @@ class Bridge:
         return result
 
 
-def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--state',default='/state')
-    parser.add_argument('--config',default='/config/config.json');parser.add_argument('--credentials',default='/config/credentials.enc')
-    parser.add_argument('--key',default='/config/secret.key');parser.add_argument('--apply',action='store_true')
-    parser.add_argument('--loop',action='store_true');parser.add_argument('--settle',type=int,default=30)
-    parser.add_argument('--health',action='store_true');args=parser.parse_args()
-    os.umask(0o077);root=Path(args.state);root.mkdir(parents=True,exist_ok=True)
-    if args.health:
-        from maintenance_settings import admin_health_age
-        r=json.loads((root/'last-run.json').read_text())
-        checked_at=time.time()
-        age=checked_at-dt.datetime.fromisoformat(r['at']).timestamp()
-        limit=admin_health_age(root,checked_at) if os.environ.get('BOOK_PROGRESS_ADMIN_CONTROL')=='1' else 240
-        raise SystemExit(0 if 0 <= age < limit and not r.get('fatal') else 1)
+def run_worker(args, root):
     lock=(root/'sync.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     config=json.loads(Path(args.config).read_text())
     credentials=json.loads(Fernet(Path(args.key).read_bytes()).decrypt(Path(args.credentials).read_bytes()))
@@ -1120,6 +1114,3 @@ def main():
             if not args.loop:raise SystemExit(1)
         if not args.loop:break
         time.sleep(config.get('interval_seconds',60))
-
-
-if __name__=='__main__':main()

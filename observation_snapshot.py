@@ -11,7 +11,7 @@ import json
 import re
 
 from abs_client import ABSClient, RequestError as ABSError
-from pinepods_client import PinepodsClient
+from pinepods_client import PinepodsClient, catalog_identity
 
 
 def _key(args, kwargs):
@@ -29,7 +29,6 @@ class _MemoRequests:
         self.__dict__ = copy.copy(source.__dict__)
         self._observation_source = source
         self._observation_cache = {}
-        self._observation_request_name = request_name
         self._observation_pine = pine
         self._observation_bookorbit = bookorbit
         self._observation_only = True
@@ -37,7 +36,9 @@ class _MemoRequests:
         # A snapshot owns no transport or login. Closing it must not close its
         # underlying client; identities are checked by the original cycle guard.
         self._observation_request = getattr(source, request_name)
-        setattr(self, request_name, self._memo_request)
+        # An injected source transport may be an instance attribute. Use the
+        # facade's class method so storing it does not retain the facade itself.
+        self.__dict__.pop(request_name, None)
 
     def _memo_value(self, method, path, *args, **kwargs):
         """Internal borrowed JSON. Public readers must return isolated copies."""
@@ -53,6 +54,8 @@ class _MemoRequests:
 
     def _memo_request(self, method, path, *args, **kwargs):
         return copy.deepcopy(self._memo_value(method,path,*args,**kwargs))
+
+    _request = _memo_request
 
     def _fresh_request(self, method, path, *args, **kwargs):
         if not _readonly(method,path,pine=self._observation_pine,bookorbit=self._observation_bookorbit):
@@ -192,6 +195,8 @@ class PineObservation(_MemoRequests, PinepodsClient):
         self._native_ids = {}
         self._catalogs = {}
         self._catalog_data = {}
+        self._planned_enclosures = None
+        self._extra_enclosures = {}
         self._calibrated = {}
         self._metadata = {}
         self._actions_index = {}
@@ -220,26 +225,60 @@ class PineObservation(_MemoRequests, PinepodsClient):
         self._drop_requests(lambda args,kwargs:args[1].startswith('/api/2/episodes/')
             and (kwargs.get('params') or {}).get('podcast') in (None,feed_url))
 
-    def _native_catalog(self, feed_url, user_id):
+    def plan_catalog(self, mappings):
+        """Retain paginated metadata for the worker's selected media only."""
+        self._planned_enclosures = {m['enclosure_url'] for m in mappings
+                                    if isinstance(m.get('enclosure_url'), str)}
+
+    def _request(self, method, path, *args, **kwargs):
+        # Only keep validated rows. Retaining the raw page or the individual
+        # fallback response as well would duplicate the largest API payloads.
+        if ((method, path) == ('GET', '/api/data/podcast_episodes')
+                or (method, path) == ('POST', '/api/data/get_episode_metadata')):
+            return self._fresh_request(method, path, *args, **kwargs)
+        return super()._request(method, path, *args, **kwargs)
+
+    def _native_catalog(self, feed_url, user_id, *, enclosures=None):
         key = (feed_url, user_id)
+        targets = self._planned_enclosures
+        if targets is not None:
+            # A previously approved route can use a different enclosure from
+            # ABS. Verify that exact route against the full feed as well.
+            extra = self._extra_enclosures.setdefault(key, set())
+            additional = (enclosures or set()) - targets - extra
+            if additional:
+                extra.update(additional)
+                self._catalogs.pop(key, None)
+            if extra and key not in self._catalogs:
+                targets = targets | extra
         if key not in self._catalogs:
-            self._catalogs[key] = PinepodsClient._native_catalog(self, feed_url, user_id)
+            self._catalogs[key] = PinepodsClient._native_catalog(self, feed_url, user_id,
+                                                                 enclosures=targets)
         return self._catalogs[key]
 
     def _accept_catalog(self, feed_url, user_id, pod, rows):
-        self._catalog_data[(feed_url, user_id)] = (copy.deepcopy(pod), {r['Episodeid']:r for r in rows})
+        self._catalog_data[(feed_url, user_id)] = (copy.deepcopy(pod), rows)
+        if self._calibrated.get(feed_url) is False:
+            self._drop_catalog_metadata(feed_url, user_id)
+
+    def _drop_catalog_metadata(self, feed_url, user_id):
+        _, rows = self._catalog_data[(feed_url, user_id)]
+        for episode_id, row in rows.items():
+            rows[episode_id] = catalog_identity(row)
 
     def _projection(self, feed_url, user_id, enclosure_url):
         # PinePods 0.9.0 exposes the same fields with legacy capitalized aliases
         # in its personal paginated feed API. Validate a representative full
         # metadata response for each feed in this cycle before using this shape.
         from pinepods_client import EpisodeUnavailable
-        podcast_id, by_url, empty = self._native_catalog(feed_url, user_id)
+        podcast_id, by_url, empty = self._native_catalog(feed_url, user_id, enclosures={enclosure_url})
         matches = by_url.get(enclosure_url, [])
         if not matches:
             raise EpisodeUnavailable('episode_identity_unresolved' if empty else 'episode_missing')
         if len(matches) != 1:raise EpisodeUnavailable('episode_ambiguous')
         episode_id = matches[0]
+        if self._calibrated.get(feed_url) is False:
+            return None, episode_id, podcast_id
         pod, rows = self._catalog_data[(feed_url, user_id)]
         row = {key.lower():value for key,value in rows[episode_id].items()}
         keys = ('completed','episodeartwork','episodedescription','episodeduration','episodeid',
@@ -270,6 +309,8 @@ class PineObservation(_MemoRequests, PinepodsClient):
                 native = PinepodsClient.inspect_episode_metadata(self, feed_url, enclosure_url, duration)
                 if feed_url not in self._calibrated:
                     self._calibrated[feed_url] = projected is not None and native['metadata'] == projected
+                    if not self._calibrated[feed_url]:
+                        self._drop_catalog_metadata(feed_url, user_id)
                 self._metadata[key] = native
             else:
                 self._metadata[key] = self._native_from_row(projected, feed_url, enclosure_url, duration,
@@ -281,16 +322,18 @@ class PineObservation(_MemoRequests, PinepodsClient):
         self._count('api_observation_index_hits')
         return result
 
-    def _fetch_actions(self, **filters):
-        self._count('api_observation_requests')
-        return self._observation_source.actions(**filters)
-
     def _feed_history(self, feed_url):
         if not self._persist_actions:
             return PinepodsClient.actions(self, feed_url)
         if self._action_store is None:
             from gpodder_observations import ActionHistory
-            self._action_store = ActionHistory(self._observation_owner, self, self._fetch_actions)
+            from io_metrics import increment
+            owner = self._observation_owner
+            source = self._observation_source
+            def fetch(**filters):
+                increment(owner, 'api_observation_requests')
+                return source.actions(**filters)
+            self._action_store = ActionHistory(owner, self, fetch)
         return self._action_store.read(feed_url)
 
     def actions(self, feed_url=None, *, since=0, limit=None):
@@ -336,6 +379,8 @@ class PineObservation(_MemoRequests, PinepodsClient):
 
 class JellyfinObservation(_MemoRequests):
     """Index already validated personal inventories for initial per-item reads."""
+    request = _MemoRequests._memo_request
+
     def __init__(self, source):
         self._initialize(source, request_name='request')
         self._inventories = []
@@ -409,6 +454,11 @@ class ObservationBatch:
         self.owner = owner
         self.persist_actions = persist_actions
         self._clients = {}
+
+    def close(self):
+        """Release the cycle's indexes and leave the original transports open."""
+        self._clients.clear()
+        self.owner = None
 
     def client(self, source):
         if source is None:

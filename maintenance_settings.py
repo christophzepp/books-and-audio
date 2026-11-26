@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from admin_store import atomic
 from restore_schedule import DEFAULTS as RESTORE_DEFAULTS, publish_policy, validate as validate_restore
 from io_policy import DEFAULTS as IO_DEFAULTS, settings as io_settings
+from worker_cli import admin_health_age
 
 
 class ScheduleError(ValueError):
@@ -204,15 +205,3 @@ class MaintenanceSchedule:
         requests = {k:v for k,v in read(path).items() if k in current}
         requests[key] = command_id
         atomic(path, requests)
-
-
-def admin_health_age(root, now):
-    """Keep the worker heartbeat bounded even when the configured poll is infrequent."""
-    try:
-        interval = json.loads((root / 'maintenance-schedule.json').read_text())['interval_seconds']
-        heartbeat = (root / 'control' / 'status.json').stat().st_mtime
-    except FileNotFoundError:
-        return 240
-    if type(interval) not in (int, float) or not math.isfinite(interval) or interval <= 0:
-        return 0
-    return max(240, interval + 180) if 0 <= now - heartbeat < 240 else 0

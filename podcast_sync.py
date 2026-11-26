@@ -1118,16 +1118,27 @@ class PodcastCoordinator:
         return 'synced',states
 
     def cycle(self, apply=False, settle=30):
+        from observation_snapshot import ObservationBatch
+        self.observation = ObservationBatch(self.b, persist_actions=apply)
+        try:
+            return self._cycle(apply, settle)
+        finally:
+            self.feed_resolver = None
+            self.observation.close()
+            self.observation = None
+
+    def _cycle(self, apply, settle):
         self.metadata_repair = None
         self.variant_checker = None
         self.feed_resolver = None
         guard(self.b)
         if self.pine: self.accounts['pinepods']=self.pine.identity
         self.account_guard(apply)
-        from observation_snapshot import ObservationBatch
-        self.observation = ObservationBatch(self.b, persist_actions=apply)
         with self.observing():
             mappings, issues = self.mappings()
+            from observation_snapshot import PineObservation
+            if isinstance(self.pine, PineObservation):
+                self.pine.plan_catalog(mappings)
         if apply and self.pine:
             from pine_metadata_repair import metadata_probe_order
             mappings = metadata_probe_order(self.b, mappings)

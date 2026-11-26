@@ -1,3 +1,7 @@
+## 0.1.0-beta.21 – Weniger Speicherbedarf beim Podcast-Abgleich
+
+Der Worker prüft PinePods-Kataloge seitenweise und behält die ausführlichen Daten der zugeordneten Folgen. Auch doppelte und fehlende Audio-Adressen werden weiterhin im gesamten Feed erkannt. Nach jedem Buch- und Podcastdurchlauf gibt der Worker die dafür angelegten Zwischenspeicher frei. Der Docker-Healthcheck liest den letzten Status mit der Python-Standardbibliothek. Bestehende Installationen können ihre bisherigen Healthcheck-Befehle weiterverwenden.
+
 ## 0.1.0-beta.20 – Geänderte Podcast-Adressen und regelmäßige Wiederherstellungsproben
 
 - Unter **Floppy-Zustellungen** lässt sich eine geänderte Audio-Adresse für eine einzelne, nachgewiesene Folge prüfen und freigeben. Die nächste inkrementelle gPodder-Abfrage kann den schon gespeicherten Hörstand zustellen.

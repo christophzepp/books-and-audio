@@ -55,7 +55,7 @@ Setze die beiden Pfade auf die tatsächlichen Sicherungsordner des gewählten Ze
 ```sh
 MAIN=/pfad/zur/sicherung/main-20261125
 RELAY=/pfad/zur/sicherung/relay-20261125
-IMAGE=ghcr.io/christophzepp/books-and-audio:0.1.0-beta.20
+IMAGE=ghcr.io/christophzepp/books-and-audio:0.1.0-beta.21
 
 docker run --rm --read-only --network none --user 1000:1000 \
   --cap-drop ALL --security-opt no-new-privileges \

@@ -114,6 +114,12 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
 
 
+def catalog_identity(row):
+    """The fields used to detect changes to an unresolved catalog candidate."""
+    return {key:row.get(key) for key in
+            ('Episodeid', 'Episodeurl', 'Episodetitle', 'Episodepubdate', 'Episodeduration')}
+
+
 class PinepodsClient:
     MAX_BODY = 32 * 1024 * 1024
     # Released Go 0.9.0 truncates at 25,000 without a total count. Never interpret
@@ -367,8 +373,8 @@ class PinepodsClient:
         self._native_user_id = user_id
         return user_id
 
-    def _native_catalog(self, feed_url, user_id):
-        """Complete validated personal feed index; observation snapshots may reuse it."""
+    def _native_catalog(self, feed_url, user_id, *, enclosures=None):
+        """Validate every personal feed row, retaining only requested identities."""
         pods = self._request('GET', '/api/data/return_pods/' + str(user_id), native=True)
         try:
             rows = pods['pods']
@@ -391,7 +397,8 @@ class PinepodsClient:
         podcast_id = matches[0]['podcastid']
         offset, expected_total, by_url, seen = 0, None, {}, set()
         empty_urls = 0
-        catalog_rows = []
+        receiver = getattr(self, '_accept_catalog', None)
+        catalog_rows = {}
         while True:
             data = self._request('GET', '/api/data/podcast_episodes', native=True,
                                  params={'user_id': user_id, 'podcast_id': podcast_id, 'limit': 200,
@@ -419,17 +426,23 @@ class PinepodsClient:
                     else:
                         _url(episode_url)
                     seen.add(episode_id)
-                    catalog_rows.append(row)
+                    if enclosures is not None and episode_url and episode_url not in enclosures:
+                        continue
                     by_url.setdefault(episode_url, []).append(episode_id)
+                    if receiver is not None:
+                        # Only the conflict signature needs rows with missing URLs.
+                        # Descriptions and artwork can be large even for such rows.
+                        catalog_rows[episode_id] = row if episode_url else catalog_identity(row)
                 offset += len(rows)
                 if offset == total:
                     break
                 if not rows:
                     raise ValueError()
+                del data, rows
             except (KeyError, TypeError, ValueError, AttributeError):
                 raise RequestError('PinePods: episode inventory is incomplete or changed') from None
-        receiver = getattr(self, '_accept_catalog', None)
-        if callable(receiver):receiver(feed_url, user_id, matches[0], catalog_rows)
+        if receiver is not None:
+            receiver(feed_url, user_id, matches[0], catalog_rows)
         return podcast_id, by_url, empty_urls
 
     def _native_episode(self, feed_url, enclosure_url, duration, *, _inspection=False):
@@ -439,7 +452,8 @@ class PinepodsClient:
         key = (feed_url, enclosure_url)
         resolved_podcast_id = None
         if key not in self._native_ids:
-            resolved_podcast_id, by_url, empty_urls = self._native_catalog(feed_url, user_id)
+            resolved_podcast_id, by_url, empty_urls = self._native_catalog(
+                feed_url, user_id, enclosures={enclosure_url})
             matches = by_url.get(enclosure_url, [])
             if not matches:
                 if empty_urls:
